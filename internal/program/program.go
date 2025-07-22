@@ -33,21 +33,69 @@ type I3Workspace struct {
 	Output  string `json:"output"`
 }
 
-func readMonitors(path, monitor string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read monitors file: %w", err)
-	}
-	var infos []MonitorInfo
-	if err := json.Unmarshal(data, &infos); err != nil {
-		return "", fmt.Errorf("parse monitors JSON: %w", err)
-	}
-	for _, mi := range infos {
-		if mi.Monitor == monitor {
-			return mi.Output, nil
-		}
-	}
-	return "", fmt.Errorf("monitor %q not found", monitor)
+// waitForReadableFile retries os.ReadFile until it succeeds (and returns
+// non‑empty data), or ctx is done.
+func waitForReadableFile(ctx context.Context, path string, interval time.Duration) ([]byte, error) {
+    ticker := time.NewTicker(interval)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return nil, fmt.Errorf("timeout waiting for readable file %q: %w", path, ctx.Err())
+        case <-ticker.C:
+            data, err := os.ReadFile(path)
+            if err == nil && len(data) > 0 {
+                return data, nil
+            }
+            // otherwise keep retrying
+        }
+    }
+}
+
+// ReadMonitorOutput waits up to timeout for the JSON file at path
+// to appear, be readable, and contain valid JSON.  It then looks for
+// the given monitor name and returns its Output.
+func ReadMonitorOutput(path, monitor string, timeout time.Duration) (string, error) {
+    // set up a context that times out after timeout
+    ctx, cancel := context.WithTimeout(context.Background(), timeout)
+    defer cancel()
+
+    // 1. Wait for the file to be readable and non‑empty
+    data, err := waitForReadableFile(ctx, path, 200*time.Millisecond)
+    if err != nil {
+        return "", err
+    }
+
+    // 2. Retry JSON unmarshalling until valid or timeout
+    var infos []MonitorInfo
+    ticker := time.NewTicker(200 * time.Millisecond)
+    defer ticker.Stop()
+
+    for {
+        if err := json.Unmarshal(data, &infos); err == nil {
+            break // valid JSON
+        }
+        select {
+        case <-ctx.Done():
+            return "", fmt.Errorf("timeout parsing monitors JSON %q: %w", path, ctx.Err())
+        case <-ticker.C:
+            data, err = os.ReadFile(path)
+            if err != nil {
+                // maybe someone truncated it, so keep retrying
+                continue
+            }
+        }
+    }
+
+    // 3. Find the requested monitor entry
+    for _, mi := range infos {
+        if mi.Monitor == monitor {
+            return mi.Output, nil
+        }
+    }
+
+    return "", fmt.Errorf("monitor %q not found in %q", monitor, path)
 }
 
 func fetchWorkspaces(ctx context.Context) ([]I3Workspace, error) {
@@ -116,7 +164,7 @@ func render(output string) error {
 
 func subscribeAndRender(monitor, monitorsFile string) {
 	// initial
-	output, err := readMonitors(monitorsFile, monitor)
+	output, err := ReadMonitorOutput(monitorsFile, monitor, 5*time.Second)
 	if err != nil {
 		log.Fatal(err)
 	}
