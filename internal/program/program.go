@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -17,7 +18,7 @@ const (
 	startWS   = 1
 	endWS     = 10
 	ewwFormat = `(box :class "workspaces" :orientation "h" :halign "start" :spacing "6" :space-evenly "true" %s)`
-	btnFormat = `(button :onclick "i3-msg 'workspace %d'" :visible %t :class "%s" "%d")`
+	btnFormat = `(button :onclick "%s workspace %d" :visible %t :class "%s" "%d")`
 )
 
 type MonitorInfo struct {
@@ -25,7 +26,7 @@ type MonitorInfo struct {
 	Output  string `json:"output"`
 }
 
-type I3Workspace struct {
+type Workspace struct {
 	Name    string `json:"name"`
 	Num     int    `json:"num"`
 	Focused bool   `json:"focused"`
@@ -33,174 +34,167 @@ type I3Workspace struct {
 	Output  string `json:"output"`
 }
 
-// waitForReadableFile retries os.ReadFile until it succeeds (and returns
-// non‑empty data), or ctx is done.
-func waitForReadableFile(ctx context.Context, path string, interval time.Duration) ([]byte, error) {
-    ticker := time.NewTicker(interval)
-    defer ticker.Stop()
+// waitForFile polls until the file at path is readable and non-empty, or context done.
+func waitForFile(ctx context.Context, path string, interval time.Duration) ([]byte, error) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
-    for {
-        select {
-        case <-ctx.Done():
-            return nil, fmt.Errorf("timeout waiting for readable file %q: %w", path, ctx.Err())
-        case <-ticker.C:
-            data, err := os.ReadFile(path)
-            if err == nil && len(data) > 0 {
-                return data, nil
-            }
-            // otherwise keep retrying
-        }
-    }
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timeout waiting for file %s: %w", path, ctx.Err())
+		case <-ticker.C:
+			data, err := os.ReadFile(path)
+			if err == nil && len(data) > 0 {
+				return data, nil
+			}
+		}
+	}
 }
 
-// ReadMonitorOutput waits up to timeout for the JSON file at path
-// to appear, be readable, and contain valid JSON.  It then looks for
-// the given monitor name and returns its Output.
-func ReadMonitorOutput(path, monitor string, timeout time.Duration) (string, error) {
-    // set up a context that times out after timeout
-    ctx, cancel := context.WithTimeout(context.Background(), timeout)
-    defer cancel()
+// readMonitorOutput reads JSON array from file and returns output for given monitor.
+func readMonitorOutput(ctx context.Context, path, monitor string) (string, error) {
+	data, err := waitForFile(ctx, path, 200*time.Millisecond)
+	if err != nil {
+		return "", err
+	}
 
-    // 1. Wait for the file to be readable and non‑empty
-    data, err := waitForReadableFile(ctx, path, 200*time.Millisecond)
-    if err != nil {
-        return "", err
-    }
+	var infos []MonitorInfo
+	for {
+		if err := json.Unmarshal(data, &infos); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("parsing JSON %s: %w", path, ctx.Err())
+		case <-time.After(200 * time.Millisecond):
+			data, _ = os.ReadFile(path)
+		}
+	}
 
-    // 2. Retry JSON unmarshalling until valid or timeout
-    var infos []MonitorInfo
-    ticker := time.NewTicker(200 * time.Millisecond)
-    defer ticker.Stop()
-
-    for {
-        if err := json.Unmarshal(data, &infos); err == nil {
-            break // valid JSON
-        }
-        select {
-        case <-ctx.Done():
-            return "", fmt.Errorf("timeout parsing monitors JSON %q: %w", path, ctx.Err())
-        case <-ticker.C:
-            data, err = os.ReadFile(path)
-            if err != nil {
-                // maybe someone truncated it, so keep retrying
-                continue
-            }
-        }
-    }
-
-    // 3. Find the requested monitor entry
-    for _, mi := range infos {
-        if mi.Monitor == monitor {
-            return mi.Output, nil
-        }
-    }
-
-    return "", fmt.Errorf("monitor %q not found in %q", monitor, path)
+	for _, mi := range infos {
+		if mi.Monitor == monitor {
+			return mi.Output, nil
+		}
+	}
+	return "", fmt.Errorf("monitor %q not found in %s", monitor, path)
 }
 
-func fetchWorkspaces(ctx context.Context) ([]I3Workspace, error) {
-	cmd := exec.CommandContext(ctx, "i3-msg", "-t", "get_workspaces")
+// fetchWorkspaces retrieves workspaces using the detected command.
+func fetchWorkspaces(ctx context.Context, cmdName string) ([]Workspace, error) {
+	cmd := exec.CommandContext(ctx, cmdName, "-t", "get_workspaces")
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("i3-msg get_workspaces: %w", err)
+		return nil, fmt.Errorf("%s get_workspaces: %w", cmdName, err)
 	}
-	var wss []I3Workspace
+	var wss []Workspace
 	if err := json.Unmarshal(out, &wss); err != nil {
-		return nil, fmt.Errorf("parse i3 workspaces JSON: %w", err)
+		return nil, fmt.Errorf("unmarshal workspaces JSON: %w", err)
 	}
 	return wss, nil
 }
 
-func render(output string) error {
-	// prepare default states
+// render builds and prints the EWW widget for the given output.
+func render(cmdName, output string) error {
 	states := make([]string, endWS+1)
-	vis := make([]bool, endWS+1)
+	visible := make([]bool, endWS+1)
 	for i := startWS; i <= endWS; i++ {
 		states[i] = "unoccupied"
-		vis[i] = true
+		visible[i] = true
 	}
 
-	// get current workspaces
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	wss, err := fetchWorkspaces(ctx)
+	wss, err := fetchWorkspaces(ctx, cmdName)
 	if err != nil {
 		return err
 	}
+
 	for _, ws := range wss {
 		if ws.Output != output {
 			continue
 		}
-		n := ws.Num
 		switch {
 		case ws.Urgent:
-			states[n] = "urgent"
-			vis[n] = true
+			states[ws.Num] = "urgent"
 		case ws.Focused:
-			states[n] = "focused"
-			vis[n] = true
+			states[ws.Num] = "focused"
 		default:
-			states[n] = "occupied"
-			vis[n] = true
+			states[ws.Num] = "occupied"
 		}
+		visible[ws.Num] = true
 	}
 
-	// build buttons
-	var parts []string
+	parts := make([]string, 0, endWS)
 	for i := startWS; i <= endWS; i++ {
-		parts = append(parts,
-			fmt.Sprintf(btnFormat,
-				i,
-				vis[i],
-				states[i],
-				i,
-			),
-		)
+		parts = append(parts, fmt.Sprintf(btnFormat, detectCommand(), i, visible[i], states[i], i))
 	}
 	widget := fmt.Sprintf(ewwFormat, strings.Join(parts, " "))
 	fmt.Println(widget)
 	return nil
 }
 
-func subscribeAndRender(monitor, monitorsFile string) {
-	// initial
-	output, err := ReadMonitorOutput(monitorsFile, monitor, 5*time.Second)
+// subscribeAndRender handles initial render and i3/sway subscriptions.
+func subscribeAndRender(monitor, file string) error {
+	cmdName := detectCommand()
+
+	// initial render
+	execCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := readMonitorOutput(execCtx, file, monitor)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	if err := render(output); err != nil {
+	if err := render(cmdName, output); err != nil {
 		log.Println("initial render error:", err)
 	}
 
-	// subscribe
-	cmd := exec.Command("i3-msg", "-t", "subscribe", "-m", `["window","workspace"]`)
-	stdout, err := cmd.StdoutPipe()
+	// subscribe to events
+	subCmd := exec.Command(cmdName, "-t", "subscribe", "-m", `["window","workspace"]`)
+	stdout, err := subCmd.StdoutPipe()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
+	if err := subCmd.Start(); err != nil {
+		return err
 	}
 
-	s := bufio.NewScanner(stdout)
-	for s.Scan() {
-		if err := render(output); err != nil {
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		if err := render(cmdName, output); err != nil {
 			log.Println("render error:", err)
 		}
 	}
-	if err := s.Err(); err != nil {
-		log.Fatal(err)
+	if err := scanner.Err(); err != nil {
+		return err
 	}
+	return nil
 }
 
+// detectCommand returns "swaymsg" if SWAYSOCK is set, otherwise "i3-msg".
+func detectCommand() string {
+	if os.Getenv("SWAYSOCK") != "" {
+		return "swaymsg"
+	}
+	return "i3-msg"
+}
 
+// Run sets up and starts the subscription-render loop.
 func Run(ctx context.Context) {
-	monitor := flag.String("monitor", "", "name of the monitor to display workspaces for")
-	file := flag.String("monitors-file", "/tmp/monitors.json", "path to monitors JSON file")
+	monitor := flag.String("monitor", "", "monitor name to display workspaces for")
+	file := flag.String("monitors-file", "/tmp/monitors.json", "path to monitor JSON file")
 	flag.Parse()
+
 	if *monitor == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
-	subscribeAndRender(*monitor, *file)
+
+	if err := subscribeAndRender(*monitor, *file); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			log.Fatalf("command exited with error: %v", err)
+		}
+		log.Fatalf("error: %v", err)
+	}
 }
