@@ -18,7 +18,7 @@ const (
 	startWS   = 1
 	endWS     = 10
 	ewwFormat = `(box :class "workspaces" :orientation "h" :halign "start" :spacing "6" :space-evenly "true" %s)`
-	btnFormat = `(button :onclick "%s workspace %d" :visible %t :class "%s" "%d")`
+	btnFormat = `(button :onclick "%s 'workspace %d'" :visible %t :class "%s" "%d")`
 )
 
 type MonitorInfo struct {
