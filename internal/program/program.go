@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/qikiqi/go-eww-workspaces/internal/version"
 )
 
 const (
@@ -199,6 +201,7 @@ func Run(ctx context.Context) {
 	flag.Parse()
 
 	if *monitor == "" {
+		version.Print()
 		flag.Usage()
 		os.Exit(1)
 	}
