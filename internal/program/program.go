@@ -173,16 +173,14 @@ func subscribeAndRender(monitor, file string) error {
 
 // detectCommand returns "swaymsg" if it successfully detects sway, otherwise "i3-msg".
 func detectCommand() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
+    ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+    defer cancel()
 
-	cmd := exec.CommandContext(ctx, "swaymsg", "-t", "get_version")
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		fmt.Printf("Detected swaymsg: %s", strings.TrimSpace(string(output)))
-		return "swaymsg"
-	}
-	return "i3-msg"
+    cmd := exec.CommandContext(ctx, "swaymsg", "-t", "get_version")
+    if err := cmd.Run(); err == nil {
+        return "swaymsg"
+    }
+    return "i3-msg"
 }
 
 // Run sets up and starts the subscription-render loop.
