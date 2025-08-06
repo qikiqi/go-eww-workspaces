@@ -171,12 +171,16 @@ func subscribeAndRender(monitor, file string) error {
 	return nil
 }
 
-// detectCommand returns "swaymsg" if SWAYSOCK is set, otherwise "i3-msg".
+// detectCommand returns "swaymsg" if it successfully detects sway, otherwise "i3-msg".
 func detectCommand() string {
-	if os.Getenv("SWAYSOCK") != "" {
-		return "swaymsg"
-	}
-	return "i3-msg"
+    ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+    defer cancel()
+
+    cmd := exec.CommandContext(ctx, "swaymsg", "-t", "get_version")
+    if err := cmd.Run(); err == nil {
+        return "swaymsg"
+    }
+    return "i3-msg"
 }
 
 // Run sets up and starts the subscription-render loop.
