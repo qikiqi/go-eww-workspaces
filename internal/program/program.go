@@ -173,13 +173,20 @@ func subscribeAndRender(monitor, file string) error {
 
 // detectCommand returns "swaymsg" if it successfully detects sway, otherwise "i3-msg".
 func detectCommand() string {
-    ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-    defer cancel()
-
-    cmd := exec.CommandContext(ctx, "swaymsg", "-t", "get_version")
-    if err := cmd.Run(); err == nil {
-        return "swaymsg"
+    // first try swaymsg
+    if swayPath, err := exec.LookPath("swaymsg"); err == nil {
+        // verify it really is a sway instance
+        ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+        defer cancel()
+        if err := exec.CommandContext(ctx, swayPath, "-t", "get_version").Run(); err == nil {
+            return swayPath
+        }
     }
+    // fallback to i3-msg
+    if i3Path, err := exec.LookPath("i3-msg"); err == nil {
+        return i3Path
+    }
+    // last resort, just the name (will error later if not on PATH)
     return "i3-msg"
 }
 
