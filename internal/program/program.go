@@ -2,6 +2,7 @@ package program
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,6 +53,36 @@ func waitForFile(ctx context.Context, path string, interval time.Duration) ([]by
 			}
 		}
 	}
+}
+
+// autoDetectMonitorOutput runs `swaymsg -t get_outputs` and returns the output
+// string for the first active monitor, formatted the same way as readMonitorOutput.
+func autoDetectMonitorOutput(ctx context.Context) (string, error) {
+	// Define only the fields we need from swaymsg JSON
+	type swayOutput struct {
+		Name   string `json:"name"`
+		Active bool   `json:"active"`
+	}
+
+	cmd := exec.CommandContext(ctx, "swaymsg", "-t", "get_outputs")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to run swaymsg: %w", err)
+	}
+
+	var outputs []swayOutput
+	if err := json.Unmarshal(out.Bytes(), &outputs); err != nil {
+		return "", fmt.Errorf("failed to parse sway outputs JSON: %w", err)
+	}
+
+	for _, o := range outputs {
+		if o.Active {
+			return o.Name, nil
+		}
+	}
+
+	return "", fmt.Errorf("no active monitor found")
 }
 
 // readMonitorOutput reads JSON array from file and returns output for given monitor.
@@ -143,7 +174,14 @@ func subscribeAndRender(monitor, file string) error {
 	// initial render
 	execCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	output, err := readMonitorOutput(execCtx, file, monitor)
+
+	var output string
+	var err error
+	if monitor == "" {
+		output, err = autoDetectMonitorOutput(execCtx)
+	} else {
+		output, err = readMonitorOutput(execCtx, file, monitor)
+	}
 	if err != nil {
 		return err
 	}
@@ -194,14 +232,15 @@ func detectCommand() string {
 
 // Run sets up and starts the subscription-render loop.
 func Run(ctx context.Context) {
-	monitor := flag.String("monitor", "", "monitor name to display workspaces for")
+	monitor := flag.String("monitor", "", "monitor name to display workspaces for, empty for autodetect")
 	file := flag.String("monitors-file", "/tmp/monitors.json", "path to monitor JSON file")
+	versionFlag := flag.Bool("version", false, "print version and exit")
+	versionFlagShort := flag.Bool("v", false, "print version and exit (shorthand)")
 	flag.Parse()
 
-	if *monitor == "" {
+	if *versionFlag || *versionFlagShort {
 		version.Print()
-		flag.Usage()
-		os.Exit(1)
+		return
 	}
 
 	if err := subscribeAndRender(*monitor, *file); err != nil {
