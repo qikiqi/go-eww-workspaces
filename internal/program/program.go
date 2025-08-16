@@ -175,8 +175,6 @@ func subscribeAndRender(monitor, file string) error {
 
 // detectCommand returns "swaymsg" if it successfully detects sway, otherwise "i3-msg".
 func detectCommand() string {
-	// Print the PATH as seen by the Go program:
-	fmt.Println("PATH:", os.Getenv("PATH"))
 	// first try swaymsg
 	if swayPath, err := exec.LookPath("swaymsg"); err == nil {
 		// verify it really is a sway instance
