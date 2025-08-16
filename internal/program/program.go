@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/qikiqi/go-eww-workspaces/internal/version"
 )
 
 const (
@@ -173,14 +175,21 @@ func subscribeAndRender(monitor, file string) error {
 
 // detectCommand returns "swaymsg" if it successfully detects sway, otherwise "i3-msg".
 func detectCommand() string {
-    ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-    defer cancel()
-
-    cmd := exec.CommandContext(ctx, "swaymsg", "-t", "get_version")
-    if err := cmd.Run(); err == nil {
-        return "swaymsg"
-    }
-    return "i3-msg"
+	// first try swaymsg
+	if swayPath, err := exec.LookPath("swaymsg"); err == nil {
+		// verify it really is a sway instance
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		if err := exec.CommandContext(ctx, swayPath, "-t", "get_version").Run(); err == nil {
+			return swayPath
+		}
+	}
+	// fallback to i3-msg
+	if i3Path, err := exec.LookPath("i3-msg"); err == nil {
+		return i3Path
+	}
+	// last resort, just the name (will error later if not on PATH)
+	return "i3-msg"
 }
 
 // Run sets up and starts the subscription-render loop.
@@ -190,6 +199,7 @@ func Run(ctx context.Context) {
 	flag.Parse()
 
 	if *monitor == "" {
+		version.Print()
 		flag.Usage()
 		os.Exit(1)
 	}
