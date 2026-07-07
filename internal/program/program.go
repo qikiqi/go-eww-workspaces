@@ -84,17 +84,17 @@ func waitForFile(ctx context.Context, path string, interval time.Duration) ([]by
 
 // autoDetectMonitorOutput runs `swaymsg -t get_outputs` and returns the output
 // string for the first active monitor, formatted the same way as readMonitorOutput.
-func autoDetectMonitorOutput(ctx context.Context) (string, error) {
+func autoDetectMonitorOutput(ctx context.Context, cmdName string) (string, error) {
 	type swayOutput struct {
 		Name   string `json:"name"`
 		Active bool   `json:"active"`
 	}
 
-	cmd := exec.CommandContext(ctx, "swaymsg", "-t", "get_outputs")
+	cmd := exec.CommandContext(ctx, cmdName, "-t", "get_outputs")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("run swaymsg: %w", err)
+		return "", fmt.Errorf("%s get_outputs: %w", cmdName, err)
 	}
 
 	var outputs []swayOutput
@@ -201,7 +201,7 @@ func subscribeAndRender(ctx context.Context, monitor, file string) error {
 	var output string
 	var err error
 	if monitor == "" {
-		output, err = autoDetectMonitorOutput(execCtx)
+		output, err = autoDetectMonitorOutput(execCtx, cmdName)
 	} else {
 		output, err = readMonitorOutput(execCtx, file, monitor)
 	}
