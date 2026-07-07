@@ -9,7 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -94,12 +94,12 @@ func autoDetectMonitorOutput(ctx context.Context) (string, error) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to run swaymsg: %w", err)
+		return "", fmt.Errorf("run swaymsg: %w", err)
 	}
 
 	var outputs []swayOutput
 	if err := json.Unmarshal(out.Bytes(), &outputs); err != nil {
-		return "", fmt.Errorf("failed to parse sway outputs JSON: %w", err)
+		return "", fmt.Errorf("parse sway outputs JSON: %w", err)
 	}
 
 	for _, o := range outputs {
@@ -127,7 +127,9 @@ func readMonitorOutput(ctx context.Context, path, monitor string) (string, error
 		case <-ctx.Done():
 			return "", fmt.Errorf("parsing JSON %s: %w", path, ctx.Err())
 		case <-time.After(200 * time.Millisecond):
-			data, _ = os.ReadFile(path)
+			if d, err := os.ReadFile(path); err == nil {
+				data = d
+			}
 		}
 	}
 
@@ -208,26 +210,26 @@ func subscribeAndRender(monitor, file string) error {
 	}
 
 	if err := render(context.Background(), os.Stdout, fetcher, cmdName, output); err != nil {
-		log.Println("initial render error:", err)
+		slog.Error("initial render failed", "err", err)
 	}
 
 	subCmd := exec.Command(cmdName, "-t", "subscribe", "-m", `["window","workspace"]`)
 	stdout, err := subCmd.StdoutPipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("create stdout pipe for subscribe: %w", err)
 	}
 	if err := subCmd.Start(); err != nil {
-		return err
+		return fmt.Errorf("start subscribe command: %w", err)
 	}
 
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		if err := render(context.Background(), os.Stdout, fetcher, cmdName, output); err != nil {
-			log.Println("render error:", err)
+			slog.Error("render failed", "err", err)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return err
+		return fmt.Errorf("subscribe scanner: %w", err)
 	}
 	return nil
 }
@@ -263,8 +265,10 @@ func Run(ctx context.Context) {
 	if err := subscribeAndRender(*monitor, *file); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			log.Fatalf("command exited with error: %v", err)
+			slog.Error("command exited with error", "err", err)
+		} else {
+			slog.Error("fatal error", "err", err)
 		}
-		log.Fatalf("error: %v", err)
+		os.Exit(1)
 	}
 }
