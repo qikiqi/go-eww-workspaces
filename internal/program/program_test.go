@@ -9,7 +9,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 // fakeFetcher implements WorkspaceFetcher for testing.
 type fakeFetcher struct {
