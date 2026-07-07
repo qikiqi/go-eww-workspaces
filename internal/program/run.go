@@ -155,24 +155,21 @@ func (h *eventHandler) Window(_ context.Context, e sway.WindowEvent) {
 }
 
 // subscribeAndRender handles initial render and sway subscription.
-func subscribeAndRender(ctx context.Context, monitor, file string) error {
+// If output is empty, the first active sway output is autodetected.
+func subscribeAndRender(ctx context.Context, output string) error {
 	client, err := sway.New(ctx)
 	if err != nil {
 		return fmt.Errorf("connect to sway: %w", err)
 	}
 	fetcher := &swayFetcher{client: client}
 
-	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	var output string
-	if monitor == "" {
-		output, err = autoDetectSwayOutput(execCtx, client)
-	} else {
-		output, err = readMonitorOutput(execCtx, file, monitor)
-	}
-	if err != nil {
-		return err
+	if output == "" {
+		detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		output, err = autoDetectSwayOutput(detectCtx, client)
+		cancel()
+		if err != nil {
+			return err
+		}
 	}
 
 	handler := newEventHandler(fetcher, os.Stdout, output, debounceInterval)
@@ -208,8 +205,7 @@ func subscribeAndRender(ctx context.Context, monitor, file string) error {
 
 // Run sets up and starts the subscription-render loop.
 func Run(ctx context.Context) {
-	monitor := flag.String("monitor", "", "monitor name to display workspaces for, empty for autodetect")
-	file := flag.String("monitors-file", "/tmp/monitors.json", "path to monitor JSON file")
+	output := flag.String("output", "", "sway output name to render workspaces for (default: first active output)")
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	versionFlagShort := flag.Bool("v", false, "print version and exit (shorthand)")
 	flag.Parse()
@@ -222,7 +218,7 @@ func Run(ctx context.Context) {
 		return
 	}
 
-	if err := subscribeAndRender(ctx, *monitor, *file); err != nil {
+	if err := subscribeAndRender(ctx, *output); err != nil {
 		slog.Error("fatal error", "err", err)
 		os.Exit(1)
 	}
