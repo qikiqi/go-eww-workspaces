@@ -202,7 +202,7 @@ func TestBuildPayload_FocusedInvariant(t *testing.T) {
 	}
 }
 
-func TestRender(t *testing.T) {
+func TestRenderPayload(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -266,34 +266,98 @@ func TestRender(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			var buf bytes.Buffer
-			err := render(context.Background(), &buf, tt.fetcher, tt.output)
+			got, err := renderPayload(context.Background(), tt.fetcher, tt.output)
 
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("render() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("renderPayload() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if tt.wantErr {
 				return
 			}
 
-			// Encoder writes exactly one JSON object followed by '\n'.
-			if b := buf.Bytes(); len(b) == 0 || b[len(b)-1] != '\n' {
-				t.Errorf("render() output missing trailing newline: %q", b)
+			if len(got) == 0 || got[len(got)-1] != '\n' {
+				t.Errorf("renderPayload() output missing trailing newline: %q", got)
 			}
 
-			var got payload
-			if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-				t.Fatalf("render() output is not valid JSON: %v (%q)", err, buf.String())
+			var p payload
+			if err := json.Unmarshal(got, &p); err != nil {
+				t.Fatalf("renderPayload() output is not valid JSON: %v (%q)", err, got)
 			}
-			if got.Focused != tt.wantFocused {
-				t.Errorf("Focused = %d, want %d", got.Focused, tt.wantFocused)
+			if p.Focused != tt.wantFocused {
+				t.Errorf("Focused = %d, want %d", p.Focused, tt.wantFocused)
 			}
 			for n, want := range tt.wantStates {
-				if s := stateOf(got.List, n); s != want {
+				if s := stateOf(p.List, n); s != want {
 					t.Errorf("workspace %d state = %q, want %q", n, s, want)
 				}
 			}
 		})
+	}
+}
+
+// mutableFetcher lets a test flip the returned workspaces between emits.
+type mutableFetcher struct {
+	workspaces []Workspace
+}
+
+func (m *mutableFetcher) FetchWorkspaces(_ context.Context) ([]Workspace, error) {
+	return m.workspaces, nil
+}
+
+func TestEventHandler_EmitDedupesRepeatedPayload(t *testing.T) {
+	t.Parallel()
+
+	const output = "HDMI-A-1"
+
+	fetcher := &mutableFetcher{
+		workspaces: []Workspace{{Num: 1, Output: output, Focused: true}},
+	}
+	var buf bytes.Buffer
+	h := &eventHandler{
+		fetcher: fetcher,
+		writer:  &buf,
+		output:  output,
+	}
+
+	ctx := context.Background()
+
+	// First emit writes.
+	h.emit(ctx)
+	if got := buf.Len(); got == 0 {
+		t.Fatalf("expected first emit to write, buffer is empty")
+	}
+	after1 := buf.Len()
+
+	// Second emit with identical state must not write.
+	h.emit(ctx)
+	if buf.Len() != after1 {
+		t.Errorf("expected repeated emit to be suppressed; buffer grew from %d to %d", after1, buf.Len())
+	}
+
+	// State change → new emission must write.
+	fetcher.workspaces = []Workspace{{Num: 2, Output: output, Focused: true}}
+	h.emit(ctx)
+	if buf.Len() <= after1 {
+		t.Errorf("expected state change to write; buffer stayed at %d", buf.Len())
+	}
+	after3 := buf.Len()
+
+	// Same again — no write.
+	h.emit(ctx)
+	if buf.Len() != after3 {
+		t.Errorf("expected repeated emit after state change to be suppressed; buffer grew from %d to %d", after3, buf.Len())
+	}
+
+	// Each emitted line should be one full JSON object with a trailing newline.
+	lines := bytes.Split(bytes.TrimRight(buf.Bytes(), "\n"), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("expected exactly 2 emitted lines, got %d: %q", len(lines), buf.String())
+	}
+	for i, line := range lines {
+		var p payload
+		if err := json.Unmarshal(line, &p); err != nil {
+			t.Errorf("line %d is not valid JSON: %v (%q)", i, err, line)
+		}
 	}
 }
 

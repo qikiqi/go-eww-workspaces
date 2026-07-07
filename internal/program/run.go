@@ -1,6 +1,7 @@
 package program
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,19 +17,22 @@ import (
 	"github.com/qikiqi/go-eww-workspaces/internal/version"
 )
 
-// render fetches workspaces and writes a JSON payload line to w.
-// Consumed by eww's deflisten; the trailing newline written by json.Encoder
-// is what deflisten treats as a value boundary.
-func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, output string) error {
+// renderPayload fetches workspaces and encodes them as a JSON line
+// (payload object + trailing '\n') suitable for eww's deflisten.
+func renderPayload(ctx context.Context, fetcher WorkspaceFetcher, output string) ([]byte, error) {
 	fetchCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
 	wss, err := fetcher.FetchWorkspaces(fetchCtx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return json.NewEncoder(w).Encode(buildPayload(wss, output))
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(buildPayload(wss, output)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // shouldRerenderWindow reports whether a window event's change type can
@@ -43,26 +47,45 @@ func shouldRerenderWindow(change sway.WindowEventChange) bool {
 }
 
 // eventHandler drives re-renders in response to sway subscribe events.
+// Skips writes when the newly-rendered payload matches the previous one,
+// so no-op events (e.g. window::move within a workspace whose occupancy
+// didn't change) don't hit the stdout pipe or eww's parser.
 type eventHandler struct {
 	sway.EventHandler
 	fetcher WorkspaceFetcher
 	writer  io.Writer
 	output  string
+	last    []byte
 }
 
-func (h eventHandler) Workspace(ctx context.Context, _ sway.WorkspaceEvent) {
-	if err := render(ctx, h.writer, h.fetcher, h.output); err != nil {
+// emit renders the current state and writes it if it differs from the
+// previous emission. Errors are logged, not returned — the subscription
+// loop must keep running.
+func (h *eventHandler) emit(ctx context.Context) {
+	next, err := renderPayload(ctx, h.fetcher, h.output)
+	if err != nil {
 		slog.Error("render failed", "err", err)
+		return
 	}
+	if bytes.Equal(next, h.last) {
+		return
+	}
+	if _, err := h.writer.Write(next); err != nil {
+		slog.Error("write failed", "err", err)
+		return
+	}
+	h.last = append(h.last[:0], next...)
 }
 
-func (h eventHandler) Window(ctx context.Context, e sway.WindowEvent) {
+func (h *eventHandler) Workspace(ctx context.Context, _ sway.WorkspaceEvent) {
+	h.emit(ctx)
+}
+
+func (h *eventHandler) Window(ctx context.Context, e sway.WindowEvent) {
 	if !shouldRerenderWindow(e.Change) {
 		return
 	}
-	if err := render(ctx, h.writer, h.fetcher, h.output); err != nil {
-		slog.Error("render failed", "err", err)
-	}
+	h.emit(ctx)
 }
 
 // subscribeAndRender handles initial render and sway subscription.
@@ -86,16 +109,14 @@ func subscribeAndRender(ctx context.Context, monitor, file string) error {
 		return err
 	}
 
-	if err := render(ctx, os.Stdout, fetcher, output); err != nil {
-		slog.Error("initial render failed", "err", err)
-	}
-
-	handler := eventHandler{
+	handler := &eventHandler{
 		EventHandler: sway.NoOpEventHandler(),
 		fetcher:      fetcher,
 		writer:       os.Stdout,
 		output:       output,
 	}
+	handler.emit(ctx)
+
 	if err := sway.Subscribe(ctx, handler, sway.EventTypeWorkspace, sway.EventTypeWindow); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil
