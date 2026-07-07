@@ -62,13 +62,18 @@ func subscribeAndRender(ctx context.Context, monitor, file string) error {
 	}
 
 	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 	for scanner.Scan() {
 		if err := render(ctx, os.Stdout, fetcher, cmdName, output); err != nil {
 			slog.Error("render failed", "err", err)
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		_ = subCmd.Wait()
 		return fmt.Errorf("subscribe scanner: %w", err)
+	}
+	if err := subCmd.Wait(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("subscribe command: %w", err)
 	}
 	return nil
 }
