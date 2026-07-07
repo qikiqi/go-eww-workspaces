@@ -239,6 +239,7 @@ func TestRender(t *testing.T) {
 		output       string
 		wantErr      bool
 		wantContains string
+		wantAbsent   string
 	}{
 		{
 			name:    "fetcher error propagates",
@@ -261,6 +262,35 @@ func TestRender(t *testing.T) {
 			output:       "HDMI-A-1",
 			wantContains: `class "focused" "1"`,
 		},
+		{
+			name: "urgent workspace appears in written output",
+			fetcher: &fakeFetcher{workspaces: []Workspace{
+				{Num: 3, Output: "HDMI-A-1", Urgent: true},
+			}},
+			cmdName:      "swaymsg",
+			output:       "HDMI-A-1",
+			wantContains: `class "urgent" "3"`,
+		},
+		{
+			name: "occupied workspace appears in written output",
+			fetcher: &fakeFetcher{workspaces: []Workspace{
+				{Num: 5, Output: "HDMI-A-1"},
+			}},
+			cmdName:      "swaymsg",
+			output:       "HDMI-A-1",
+			wantContains: `class "occupied" "5"`,
+		},
+		{
+			name: "workspaces on other output are excluded",
+			fetcher: &fakeFetcher{workspaces: []Workspace{
+				{Num: 1, Output: "HDMI-A-1", Focused: true},
+				{Num: 2, Output: "DP-1", Focused: true},
+			}},
+			cmdName:      "swaymsg",
+			output:       "HDMI-A-1",
+			wantContains: `class "focused" "1"`,
+			wantAbsent:   `class "focused" "2"`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -275,6 +305,9 @@ func TestRender(t *testing.T) {
 			}
 			if !tt.wantErr && tt.wantContains != "" && !strings.Contains(buf.String(), tt.wantContains) {
 				t.Errorf("render() output missing %q\ngot: %s", tt.wantContains, buf.String())
+			}
+			if !tt.wantErr && tt.wantAbsent != "" && strings.Contains(buf.String(), tt.wantAbsent) {
+				t.Errorf("render() output unexpectedly contains %q\ngot: %s", tt.wantAbsent, buf.String())
 			}
 		})
 	}
