@@ -1,0 +1,42 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    # correctness
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    # style & formatting
+    - gofumpt
+    - goimports
+    - whitespace
+    - misspell
+    # quality
+    - gocritic
+    - unconvert
+    - prealloc
+    - nolintlint
+    # security
+    - gosec
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/qikiqi/go-eww-workspaces
+    gosec:
+      excludes:
+        # cmdName comes from detectCommand() via exec.LookPath, not user input
+        - G204
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck  # t.Fatal-unreachable goroutines may use _ = f()
+          - gosec

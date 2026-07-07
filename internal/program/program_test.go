@@ -56,56 +56,56 @@ func TestBuildWidget(t *testing.T) {
 			},
 		},
 		{
-			name:       "focused workspace",
-			workspaces: []Workspace{{Num: 1, Output: myOut, Focused: true}},
-			output:     myOut,
-			cmdName:    cmd,
+			name:         "focused workspace",
+			workspaces:   []Workspace{{Num: 1, Output: myOut, Focused: true}},
+			output:       myOut,
+			cmdName:      cmd,
 			wantContains: []string{`class "focused" "1"`},
 			wantAbsent:   []string{`class "unoccupied" "1"`},
 		},
 		{
-			name:       "urgent workspace",
-			workspaces: []Workspace{{Num: 3, Output: myOut, Urgent: true}},
-			output:     myOut,
-			cmdName:    cmd,
+			name:         "urgent workspace",
+			workspaces:   []Workspace{{Num: 3, Output: myOut, Urgent: true}},
+			output:       myOut,
+			cmdName:      cmd,
 			wantContains: []string{`class "urgent" "3"`},
 			wantAbsent:   []string{`class "unoccupied" "3"`},
 		},
 		{
-			name:       "occupied workspace - neither focused nor urgent",
-			workspaces: []Workspace{{Num: 5, Output: myOut}},
-			output:     myOut,
-			cmdName:    cmd,
+			name:         "occupied workspace - neither focused nor urgent",
+			workspaces:   []Workspace{{Num: 5, Output: myOut}},
+			output:       myOut,
+			cmdName:      cmd,
 			wantContains: []string{`class "occupied" "5"`},
 		},
 		{
-			name:       "urgent beats focused when both set",
-			workspaces: []Workspace{{Num: 2, Output: myOut, Focused: true, Urgent: true}},
-			output:     myOut,
-			cmdName:    cmd,
+			name:         "urgent beats focused when both set",
+			workspaces:   []Workspace{{Num: 2, Output: myOut, Focused: true, Urgent: true}},
+			output:       myOut,
+			cmdName:      cmd,
 			wantContains: []string{`class "urgent" "2"`},
 			wantAbsent:   []string{`class "focused" "2"`},
 		},
 		{
-			name:       "workspace on different output is ignored",
-			workspaces: []Workspace{{Num: 4, Output: otherOut, Focused: true}},
-			output:     myOut,
-			cmdName:    cmd,
+			name:         "workspace on different output is ignored",
+			workspaces:   []Workspace{{Num: 4, Output: otherOut, Focused: true}},
+			output:       myOut,
+			cmdName:      cmd,
 			wantContains: []string{`class "unoccupied" "4"`},
 			wantAbsent:   []string{`class "focused" "4"`},
 		},
 		{
-			name:       "workspace num below range is ignored",
-			workspaces: []Workspace{{Num: 0, Output: myOut, Focused: true}},
-			output:     myOut,
-			cmdName:    cmd,
+			name:         "workspace num below range is ignored",
+			workspaces:   []Workspace{{Num: 0, Output: myOut, Focused: true}},
+			output:       myOut,
+			cmdName:      cmd,
 			wantContains: []string{`class "unoccupied" "1"`},
 		},
 		{
-			name:       "workspace num above range is ignored",
-			workspaces: []Workspace{{Num: 11, Output: myOut, Urgent: true}},
-			output:     myOut,
-			cmdName:    cmd,
+			name:         "workspace num above range is ignored",
+			workspaces:   []Workspace{{Num: 11, Output: myOut, Urgent: true}},
+			output:       myOut,
+			cmdName:      cmd,
 			wantContains: []string{`class "unoccupied" "10"`},
 		},
 		{
@@ -185,7 +185,7 @@ func TestBuildWidget_FocusedCount(t *testing.T) {
 	const output = "HDMI-A-1"
 
 	tests := []struct {
-		name      string
+		name       string
 		workspaces []Workspace
 		wantCount  int
 	}{
