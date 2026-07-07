@@ -9,13 +9,13 @@ const (
 	startWS   = 1
 	endWS     = 10
 	ewwFormat = `(box :class "workspaces" :orientation "h" :halign "start" :spacing "6" :space-evenly "true" %s)`
-	btnFormat = `(button :onclick "%s 'workspace %d'" :visible %t :class "%s" "%d")`
+	btnFormat = `(button :onclick "swaymsg 'workspace %d'" :visible %t :class "%s" "%d")`
 )
 
 // buildWidget maps workspaces onto button states and returns the EWW widget string.
 // Workspaces on a different output are ignored. Workspace numbers outside [startWS, endWS]
 // are ignored (prevents out-of-bounds on the state slices).
-func buildWidget(workspaces []Workspace, output, cmdName string) string {
+func buildWidget(workspaces []Workspace, output string) string {
 	states := make([]string, endWS+1)
 	visible := make([]bool, endWS+1)
 	for i := startWS; i <= endWS; i++ {
@@ -42,7 +42,7 @@ func buildWidget(workspaces []Workspace, output, cmdName string) string {
 
 	parts := make([]string, 0, endWS)
 	for i := startWS; i <= endWS; i++ {
-		parts = append(parts, fmt.Sprintf(btnFormat, cmdName, i, visible[i], states[i], i))
+		parts = append(parts, fmt.Sprintf(btnFormat, i, visible[i], states[i], i))
 	}
 	return fmt.Sprintf(ewwFormat, strings.Join(parts, " "))
 }

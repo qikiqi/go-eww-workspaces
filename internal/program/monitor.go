@@ -1,13 +1,13 @@
 package program
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
+
+	sway "github.com/joshuarubin/go-sway"
 )
 
 // waitForFile polls until the file at path is readable and non-empty, or context done.
@@ -28,32 +28,17 @@ func waitForFile(ctx context.Context, path string, interval time.Duration) ([]by
 	}
 }
 
-// autoDetectMonitorOutput runs `<cmd> -t get_outputs` and returns the output
-// string for the first active monitor, formatted the same way as readMonitorOutput.
-func autoDetectMonitorOutput(ctx context.Context, cmdName string) (string, error) {
-	type swayOutput struct {
-		Name   string `json:"name"`
-		Active bool   `json:"active"`
+// autoDetectSwayOutput returns the name of the first active sway output.
+func autoDetectSwayOutput(ctx context.Context, client sway.Client) (string, error) {
+	outputs, err := client.GetOutputs(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get_outputs: %w", err)
 	}
-
-	cmd := exec.CommandContext(ctx, cmdName, "-t", "get_outputs")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s get_outputs: %w", cmdName, err)
-	}
-
-	var outputs []swayOutput
-	if err := json.Unmarshal(out.Bytes(), &outputs); err != nil {
-		return "", fmt.Errorf("parse sway outputs JSON: %w", err)
-	}
-
 	for _, o := range outputs {
 		if o.Active {
 			return o.Name, nil
 		}
 	}
-
 	return "", fmt.Errorf("no active monitor found")
 }
 
