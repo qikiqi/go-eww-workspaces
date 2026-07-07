@@ -9,7 +9,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 // fakeFetcher implements WorkspaceFetcher for testing.
 type fakeFetcher struct {
@@ -233,6 +239,7 @@ func TestRender(t *testing.T) {
 		output       string
 		wantErr      bool
 		wantContains string
+		wantAbsent   string
 	}{
 		{
 			name:    "fetcher error propagates",
@@ -255,6 +262,35 @@ func TestRender(t *testing.T) {
 			output:       "HDMI-A-1",
 			wantContains: `class "focused" "1"`,
 		},
+		{
+			name: "urgent workspace appears in written output",
+			fetcher: &fakeFetcher{workspaces: []Workspace{
+				{Num: 3, Output: "HDMI-A-1", Urgent: true},
+			}},
+			cmdName:      "swaymsg",
+			output:       "HDMI-A-1",
+			wantContains: `class "urgent" "3"`,
+		},
+		{
+			name: "occupied workspace appears in written output",
+			fetcher: &fakeFetcher{workspaces: []Workspace{
+				{Num: 5, Output: "HDMI-A-1"},
+			}},
+			cmdName:      "swaymsg",
+			output:       "HDMI-A-1",
+			wantContains: `class "occupied" "5"`,
+		},
+		{
+			name: "workspaces on other output are excluded",
+			fetcher: &fakeFetcher{workspaces: []Workspace{
+				{Num: 1, Output: "HDMI-A-1", Focused: true},
+				{Num: 2, Output: "DP-1", Focused: true},
+			}},
+			cmdName:      "swaymsg",
+			output:       "HDMI-A-1",
+			wantContains: `class "focused" "1"`,
+			wantAbsent:   `class "focused" "2"`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -269,6 +305,9 @@ func TestRender(t *testing.T) {
 			}
 			if !tt.wantErr && tt.wantContains != "" && !strings.Contains(buf.String(), tt.wantContains) {
 				t.Errorf("render() output missing %q\ngot: %s", tt.wantContains, buf.String())
+			}
+			if !tt.wantErr && tt.wantAbsent != "" && strings.Contains(buf.String(), tt.wantAbsent) {
+				t.Errorf("render() output unexpectedly contains %q\ngot: %s", tt.wantAbsent, buf.String())
 			}
 		})
 	}
@@ -391,6 +430,35 @@ func TestReadMonitorOutput(t *testing.T) {
 		_, err := readMonitorOutput(ctx, path, "eDP-1")
 		if err == nil {
 			t.Error("readMonitorOutput() expected error for canceled context, got nil")
+		}
+	})
+
+	t.Run("retries until file contains valid JSON", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		path := filepath.Join(dir, "monitors.json")
+
+		// Non-empty content that passes waitForFile but fails json.Unmarshal.
+		if err := os.WriteFile(path, []byte(`not valid json`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Overwrite with valid JSON well before the 200 ms retry fires.
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			_ = os.WriteFile(path, []byte(`[{"monitor":"eDP-1","output":"HDMI-A-1"}]`), 0o644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		got, err := readMonitorOutput(ctx, path, "eDP-1")
+		if err != nil {
+			t.Fatalf("readMonitorOutput() unexpected error: %v", err)
+		}
+		if got != "HDMI-A-1" {
+			t.Errorf("readMonitorOutput() = %q, want %q", got, "HDMI-A-1")
 		}
 	})
 }
