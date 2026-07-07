@@ -6,9 +6,9 @@ type MonitorInfo struct {
 }
 
 type Workspace struct {
-	Name    string `json:"name"`
-	Num     int    `json:"num"`
-	Focused bool   `json:"focused"`
-	Urgent  bool   `json:"urgent"`
-	Output  string `json:"output"`
+	Name    string
+	Num     int
+	Focused bool
+	Urgent  bool
+	Output  string
 }

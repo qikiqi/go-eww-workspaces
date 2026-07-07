@@ -1,7 +1,6 @@
 package program
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -9,14 +8,15 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"time"
+
+	sway "github.com/joshuarubin/go-sway"
 
 	"github.com/qikiqi/go-eww-workspaces/internal/version"
 )
 
 // render fetches workspaces and writes the EWW widget string to w.
-func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, cmdName, output string) error {
+func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, output string) error {
 	fetchCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
@@ -25,22 +25,58 @@ func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, cmdName,
 		return err
 	}
 
-	fmt.Fprintln(w, buildWidget(wss, output, cmdName))
+	fmt.Fprintln(w, buildWidget(wss, output))
 	return nil
 }
 
-// subscribeAndRender handles initial render and i3/sway subscriptions.
+// shouldRerenderWindow reports whether a window event's change type can
+// affect the workspace widget (i.e. workspace occupancy).
+func shouldRerenderWindow(change sway.WindowEventChange) bool {
+	switch change {
+	case sway.WindowNew, sway.WindowClose, sway.WindowMove:
+		return true
+	default:
+		return false
+	}
+}
+
+// eventHandler drives re-renders in response to sway subscribe events.
+type eventHandler struct {
+	sway.EventHandler
+	fetcher WorkspaceFetcher
+	writer  io.Writer
+	output  string
+}
+
+func (h eventHandler) Workspace(ctx context.Context, _ sway.WorkspaceEvent) {
+	if err := render(ctx, h.writer, h.fetcher, h.output); err != nil {
+		slog.Error("render failed", "err", err)
+	}
+}
+
+func (h eventHandler) Window(ctx context.Context, e sway.WindowEvent) {
+	if !shouldRerenderWindow(e.Change) {
+		return
+	}
+	if err := render(ctx, h.writer, h.fetcher, h.output); err != nil {
+		slog.Error("render failed", "err", err)
+	}
+}
+
+// subscribeAndRender handles initial render and sway subscription.
 func subscribeAndRender(ctx context.Context, monitor, file string) error {
-	cmdName := detectCommand()
-	fetcher := &commandFetcher{cmdName: cmdName}
+	client, err := sway.New(ctx)
+	if err != nil {
+		return fmt.Errorf("connect to sway: %w", err)
+	}
+	fetcher := &swayFetcher{client: client}
 
 	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var output string
-	var err error
 	if monitor == "" {
-		output, err = autoDetectMonitorOutput(execCtx, cmdName)
+		output, err = autoDetectSwayOutput(execCtx, client)
 	} else {
 		output, err = readMonitorOutput(execCtx, file, monitor)
 	}
@@ -48,32 +84,21 @@ func subscribeAndRender(ctx context.Context, monitor, file string) error {
 		return err
 	}
 
-	if err := render(ctx, os.Stdout, fetcher, cmdName, output); err != nil {
+	if err := render(ctx, os.Stdout, fetcher, output); err != nil {
 		slog.Error("initial render failed", "err", err)
 	}
 
-	subCmd := exec.CommandContext(ctx, cmdName, "-t", "subscribe", "-m", `["window","workspace"]`)
-	stdout, err := subCmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("create stdout pipe for subscribe: %w", err)
+	handler := eventHandler{
+		EventHandler: sway.NoOpEventHandler(),
+		fetcher:      fetcher,
+		writer:       os.Stdout,
+		output:       output,
 	}
-	if err := subCmd.Start(); err != nil {
-		return fmt.Errorf("start subscribe command: %w", err)
-	}
-
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1<<20), 1<<20)
-	for scanner.Scan() {
-		if err := render(ctx, os.Stdout, fetcher, cmdName, output); err != nil {
-			slog.Error("render failed", "err", err)
+	if err := sway.Subscribe(ctx, handler, sway.EventTypeWorkspace, sway.EventTypeWindow); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		_ = subCmd.Wait()
-		return fmt.Errorf("subscribe scanner: %w", err)
-	}
-	if err := subCmd.Wait(); err != nil && ctx.Err() == nil {
-		return fmt.Errorf("subscribe command: %w", err)
+		return fmt.Errorf("sway subscribe: %w", err)
 	}
 	return nil
 }
@@ -95,12 +120,7 @@ func Run(ctx context.Context) {
 	}
 
 	if err := subscribeAndRender(ctx, *monitor, *file); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			slog.Error("command exited with error", "err", err)
-		} else {
-			slog.Error("fatal error", "err", err)
-		}
+		slog.Error("fatal error", "err", err)
 		os.Exit(1)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	sway "github.com/joshuarubin/go-sway"
 	"go.uber.org/goleak"
 )
 
@@ -31,7 +32,6 @@ func TestBuildWidget(t *testing.T) {
 	t.Parallel()
 
 	const (
-		cmd      = "swaymsg"
 		myOut    = "HDMI-A-1"
 		otherOut = "DP-1"
 	)
@@ -40,7 +40,6 @@ func TestBuildWidget(t *testing.T) {
 		name         string
 		workspaces   []Workspace
 		output       string
-		cmdName      string
 		wantContains []string
 		wantAbsent   []string
 	}{
@@ -48,7 +47,6 @@ func TestBuildWidget(t *testing.T) {
 			name:       "nil workspaces - all unoccupied",
 			workspaces: nil,
 			output:     myOut,
-			cmdName:    cmd,
 			wantContains: []string{
 				`class "unoccupied" "1"`,
 				`class "unoccupied" "5"`,
@@ -59,7 +57,6 @@ func TestBuildWidget(t *testing.T) {
 			name:         "focused workspace",
 			workspaces:   []Workspace{{Num: 1, Output: myOut, Focused: true}},
 			output:       myOut,
-			cmdName:      cmd,
 			wantContains: []string{`class "focused" "1"`},
 			wantAbsent:   []string{`class "unoccupied" "1"`},
 		},
@@ -67,7 +64,6 @@ func TestBuildWidget(t *testing.T) {
 			name:         "urgent workspace",
 			workspaces:   []Workspace{{Num: 3, Output: myOut, Urgent: true}},
 			output:       myOut,
-			cmdName:      cmd,
 			wantContains: []string{`class "urgent" "3"`},
 			wantAbsent:   []string{`class "unoccupied" "3"`},
 		},
@@ -75,14 +71,12 @@ func TestBuildWidget(t *testing.T) {
 			name:         "occupied workspace - neither focused nor urgent",
 			workspaces:   []Workspace{{Num: 5, Output: myOut}},
 			output:       myOut,
-			cmdName:      cmd,
 			wantContains: []string{`class "occupied" "5"`},
 		},
 		{
 			name:         "urgent beats focused when both set",
 			workspaces:   []Workspace{{Num: 2, Output: myOut, Focused: true, Urgent: true}},
 			output:       myOut,
-			cmdName:      cmd,
 			wantContains: []string{`class "urgent" "2"`},
 			wantAbsent:   []string{`class "focused" "2"`},
 		},
@@ -90,7 +84,6 @@ func TestBuildWidget(t *testing.T) {
 			name:         "workspace on different output is ignored",
 			workspaces:   []Workspace{{Num: 4, Output: otherOut, Focused: true}},
 			output:       myOut,
-			cmdName:      cmd,
 			wantContains: []string{`class "unoccupied" "4"`},
 			wantAbsent:   []string{`class "focused" "4"`},
 		},
@@ -98,43 +91,30 @@ func TestBuildWidget(t *testing.T) {
 			name:         "workspace num below range is ignored",
 			workspaces:   []Workspace{{Num: 0, Output: myOut, Focused: true}},
 			output:       myOut,
-			cmdName:      cmd,
 			wantContains: []string{`class "unoccupied" "1"`},
 		},
 		{
 			name:         "workspace num above range is ignored",
 			workspaces:   []Workspace{{Num: 11, Output: myOut, Urgent: true}},
 			output:       myOut,
-			cmdName:      cmd,
 			wantContains: []string{`class "unoccupied" "10"`},
 		},
 		{
-			name:    "onclick attribute uses cmdName for all buttons",
-			output:  myOut,
-			cmdName: cmd,
+			name:   "onclick attribute uses swaymsg for all buttons",
+			output: myOut,
 			wantContains: []string{
-				fmt.Sprintf(`onclick "%s 'workspace 1'"`, cmd),
-				fmt.Sprintf(`onclick "%s 'workspace 10'"`, cmd),
+				`onclick "swaymsg 'workspace 1'"`,
+				`onclick "swaymsg 'workspace 10'"`,
 			},
 		},
 		{
-			name:    "output wrapped in eww box element",
-			output:  myOut,
-			cmdName: cmd,
+			name:   "output wrapped in eww box element",
+			output: myOut,
 			wantContains: []string{
 				`(box :class "workspaces"`,
 				`:orientation "h"`,
 				`:halign "start"`,
 				`:spacing "6"`,
-			},
-		},
-		{
-			name:    "absolute path cmdName appears verbatim in onclick",
-			output:  myOut,
-			cmdName: "/usr/bin/swaymsg",
-			wantContains: []string{
-				`onclick "/usr/bin/swaymsg 'workspace 1'"`,
-				`onclick "/usr/bin/swaymsg 'workspace 10'"`,
 			},
 		},
 		{
@@ -145,8 +125,7 @@ func TestBuildWidget(t *testing.T) {
 				{Num: 3, Output: myOut},
 				{Num: 4, Output: otherOut, Focused: true}, // different output, ignored
 			},
-			output:  myOut,
-			cmdName: cmd,
+			output: myOut,
 			wantContains: []string{
 				`class "focused" "1"`,
 				`class "urgent" "2"`,
@@ -160,7 +139,7 @@ func TestBuildWidget(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := buildWidget(tt.workspaces, tt.output, tt.cmdName)
+			got := buildWidget(tt.workspaces, tt.output)
 
 			for _, want := range tt.wantContains {
 				if !strings.Contains(got, want) {
@@ -221,7 +200,7 @@ func TestBuildWidget_FocusedCount(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := buildWidget(tt.workspaces, output, "swaymsg")
+			got := buildWidget(tt.workspaces, output)
 			if count := strings.Count(got, `class "focused"`); count != tt.wantCount {
 				t.Errorf("buildWidget() focused button count = %d, want %d\ngot: %s", count, tt.wantCount, got)
 			}
@@ -235,7 +214,6 @@ func TestRender(t *testing.T) {
 	tests := []struct {
 		name         string
 		fetcher      WorkspaceFetcher
-		cmdName      string
 		output       string
 		wantErr      bool
 		wantContains string
@@ -249,7 +227,6 @@ func TestRender(t *testing.T) {
 		{
 			name:         "empty workspaces writes widget to writer",
 			fetcher:      &fakeFetcher{},
-			cmdName:      "swaymsg",
 			output:       "HDMI-A-1",
 			wantContains: `class "workspaces"`,
 		},
@@ -258,7 +235,6 @@ func TestRender(t *testing.T) {
 			fetcher: &fakeFetcher{workspaces: []Workspace{
 				{Num: 1, Output: "HDMI-A-1", Focused: true},
 			}},
-			cmdName:      "swaymsg",
 			output:       "HDMI-A-1",
 			wantContains: `class "focused" "1"`,
 		},
@@ -267,7 +243,6 @@ func TestRender(t *testing.T) {
 			fetcher: &fakeFetcher{workspaces: []Workspace{
 				{Num: 3, Output: "HDMI-A-1", Urgent: true},
 			}},
-			cmdName:      "swaymsg",
 			output:       "HDMI-A-1",
 			wantContains: `class "urgent" "3"`,
 		},
@@ -276,7 +251,6 @@ func TestRender(t *testing.T) {
 			fetcher: &fakeFetcher{workspaces: []Workspace{
 				{Num: 5, Output: "HDMI-A-1"},
 			}},
-			cmdName:      "swaymsg",
 			output:       "HDMI-A-1",
 			wantContains: `class "occupied" "5"`,
 		},
@@ -286,7 +260,6 @@ func TestRender(t *testing.T) {
 				{Num: 1, Output: "HDMI-A-1", Focused: true},
 				{Num: 2, Output: "DP-1", Focused: true},
 			}},
-			cmdName:      "swaymsg",
 			output:       "HDMI-A-1",
 			wantContains: `class "focused" "1"`,
 			wantAbsent:   `class "focused" "2"`,
@@ -298,7 +271,7 @@ func TestRender(t *testing.T) {
 			t.Parallel()
 
 			var buf bytes.Buffer
-			err := render(context.Background(), &buf, tt.fetcher, tt.cmdName, tt.output)
+			err := render(context.Background(), &buf, tt.fetcher, tt.output)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("render() error = %v, wantErr %v", err, tt.wantErr)
@@ -308,6 +281,35 @@ func TestRender(t *testing.T) {
 			}
 			if !tt.wantErr && tt.wantAbsent != "" && strings.Contains(buf.String(), tt.wantAbsent) {
 				t.Errorf("render() output unexpectedly contains %q\ngot: %s", tt.wantAbsent, buf.String())
+			}
+		})
+	}
+}
+
+func TestShouldRerenderWindow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		change sway.WindowEventChange
+		want   bool
+	}{
+		{sway.WindowNew, true},
+		{sway.WindowClose, true},
+		{sway.WindowMove, true},
+		{sway.WindowFocus, false},
+		{sway.WindowTitle, false},
+		{sway.WindowMark, false},
+		{sway.WindowFullscreen, false},
+		{sway.WindowFloating, false},
+		{sway.WindowUrgent, false},
+		{sway.WindowEventChange("unknown"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.change), func(t *testing.T) {
+			t.Parallel()
+			if got := shouldRerenderWindow(tt.change); got != tt.want {
+				t.Errorf("shouldRerenderWindow(%q) = %v, want %v", tt.change, got, tt.want)
 			}
 		})
 	}

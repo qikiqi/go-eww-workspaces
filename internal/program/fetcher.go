@@ -2,10 +2,9 @@ package program
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os/exec"
-	"time"
+
+	sway "github.com/joshuarubin/go-sway"
 )
 
 // WorkspaceFetcher retrieves the current workspace list from the window manager.
@@ -14,37 +13,27 @@ type WorkspaceFetcher interface {
 }
 
 // compile-time check
-var _ WorkspaceFetcher = (*commandFetcher)(nil)
+var _ WorkspaceFetcher = (*swayFetcher)(nil)
 
-// commandFetcher is the real WorkspaceFetcher backed by swaymsg/i3-msg.
-type commandFetcher struct {
-	cmdName string
+// swayFetcher is the WorkspaceFetcher backed by go-sway's IPC client.
+type swayFetcher struct {
+	client sway.Client
 }
 
-func (f *commandFetcher) FetchWorkspaces(ctx context.Context) ([]Workspace, error) {
-	cmd := exec.CommandContext(ctx, f.cmdName, "-t", "get_workspaces")
-	out, err := cmd.Output()
+func (f *swayFetcher) FetchWorkspaces(ctx context.Context) ([]Workspace, error) {
+	swss, err := f.client.GetWorkspaces(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("%s get_workspaces: %w", f.cmdName, err)
+		return nil, fmt.Errorf("get_workspaces: %w", err)
 	}
-	var wss []Workspace
-	if err := json.Unmarshal(out, &wss); err != nil {
-		return nil, fmt.Errorf("unmarshal workspaces JSON: %w", err)
-	}
-	return wss, nil
-}
-
-// detectCommand returns "swaymsg" if it successfully detects sway, otherwise "i3-msg".
-func detectCommand() string {
-	if swayPath, err := exec.LookPath("swaymsg"); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-		defer cancel()
-		if err := exec.CommandContext(ctx, swayPath, "-t", "get_version").Run(); err == nil {
-			return swayPath
+	wss := make([]Workspace, len(swss))
+	for i, w := range swss {
+		wss[i] = Workspace{
+			Name:    w.Name,
+			Num:     int(w.Num),
+			Focused: w.Focused,
+			Urgent:  w.Urgent,
+			Output:  w.Output,
 		}
 	}
-	if i3Path, err := exec.LookPath("i3-msg"); err == nil {
-		return i3Path
-	}
-	return "i3-msg"
+	return wss, nil
 }
