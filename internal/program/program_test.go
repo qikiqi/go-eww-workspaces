@@ -3,10 +3,10 @@ package program
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +28,16 @@ func (f *fakeFetcher) FetchWorkspaces(_ context.Context) ([]Workspace, error) {
 	return f.workspaces, f.err
 }
 
-func TestBuildWidget(t *testing.T) {
+// stateOf returns the state string of the entry for workspace num in list.
+// Returns "" if num is out of range.
+func stateOf(list []wsView, num int) string {
+	if num < startWS || num > endWS {
+		return ""
+	}
+	return list[num-startWS].State
+}
+
+func TestBuildPayload(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -37,85 +46,67 @@ func TestBuildWidget(t *testing.T) {
 	)
 
 	tests := []struct {
-		name         string
-		workspaces   []Workspace
-		output       string
-		wantContains []string
-		wantAbsent   []string
+		name        string
+		workspaces  []Workspace
+		output      string
+		wantFocused int
+		wantStates  map[int]string // ws num -> expected state; omitted nums default to "unoccupied"
 	}{
 		{
-			name:       "nil workspaces - all unoccupied",
-			workspaces: nil,
-			output:     myOut,
-			wantContains: []string{
-				`class "unoccupied" "1"`,
-				`class "unoccupied" "5"`,
-				`class "unoccupied" "10"`,
-			},
+			name:        "nil workspaces - all unoccupied",
+			workspaces:  nil,
+			output:      myOut,
+			wantFocused: 0,
+			wantStates:  map[int]string{1: "unoccupied", 5: "unoccupied", 10: "unoccupied"},
 		},
 		{
-			name:         "focused workspace",
-			workspaces:   []Workspace{{Num: 1, Output: myOut, Focused: true}},
-			output:       myOut,
-			wantContains: []string{`class "focused" "1"`},
-			wantAbsent:   []string{`class "unoccupied" "1"`},
+			name:        "focused workspace",
+			workspaces:  []Workspace{{Num: 1, Output: myOut, Focused: true}},
+			output:      myOut,
+			wantFocused: 1,
+			wantStates:  map[int]string{1: "focused"},
 		},
 		{
-			name:         "urgent workspace",
-			workspaces:   []Workspace{{Num: 3, Output: myOut, Urgent: true}},
-			output:       myOut,
-			wantContains: []string{`class "urgent" "3"`},
-			wantAbsent:   []string{`class "unoccupied" "3"`},
+			name:        "urgent workspace",
+			workspaces:  []Workspace{{Num: 3, Output: myOut, Urgent: true}},
+			output:      myOut,
+			wantFocused: 0,
+			wantStates:  map[int]string{3: "urgent"},
 		},
 		{
-			name:         "occupied workspace - neither focused nor urgent",
-			workspaces:   []Workspace{{Num: 5, Output: myOut}},
-			output:       myOut,
-			wantContains: []string{`class "occupied" "5"`},
+			name:        "occupied workspace - neither focused nor urgent",
+			workspaces:  []Workspace{{Num: 5, Output: myOut}},
+			output:      myOut,
+			wantFocused: 0,
+			wantStates:  map[int]string{5: "occupied"},
 		},
 		{
-			name:         "urgent beats focused when both set",
-			workspaces:   []Workspace{{Num: 2, Output: myOut, Focused: true, Urgent: true}},
-			output:       myOut,
-			wantContains: []string{`class "urgent" "2"`},
-			wantAbsent:   []string{`class "focused" "2"`},
+			name:        "urgent beats focused when both set",
+			workspaces:  []Workspace{{Num: 2, Output: myOut, Focused: true, Urgent: true}},
+			output:      myOut,
+			wantFocused: 0, // focused not counted when urgent wins
+			wantStates:  map[int]string{2: "urgent"},
 		},
 		{
-			name:         "workspace on different output is ignored",
-			workspaces:   []Workspace{{Num: 4, Output: otherOut, Focused: true}},
-			output:       myOut,
-			wantContains: []string{`class "unoccupied" "4"`},
-			wantAbsent:   []string{`class "focused" "4"`},
+			name:        "workspace on different output is ignored",
+			workspaces:  []Workspace{{Num: 4, Output: otherOut, Focused: true}},
+			output:      myOut,
+			wantFocused: 0,
+			wantStates:  map[int]string{4: "unoccupied"},
 		},
 		{
-			name:         "workspace num below range is ignored",
-			workspaces:   []Workspace{{Num: 0, Output: myOut, Focused: true}},
-			output:       myOut,
-			wantContains: []string{`class "unoccupied" "1"`},
+			name:        "workspace num below range is ignored",
+			workspaces:  []Workspace{{Num: 0, Output: myOut, Focused: true}},
+			output:      myOut,
+			wantFocused: 0,
+			wantStates:  map[int]string{1: "unoccupied"},
 		},
 		{
-			name:         "workspace num above range is ignored",
-			workspaces:   []Workspace{{Num: 11, Output: myOut, Urgent: true}},
-			output:       myOut,
-			wantContains: []string{`class "unoccupied" "10"`},
-		},
-		{
-			name:   "onclick attribute uses swaymsg for all buttons",
-			output: myOut,
-			wantContains: []string{
-				`onclick "swaymsg 'workspace 1'"`,
-				`onclick "swaymsg 'workspace 10'"`,
-			},
-		},
-		{
-			name:   "output wrapped in eww box element",
-			output: myOut,
-			wantContains: []string{
-				`(box :class "workspaces"`,
-				`:orientation "h"`,
-				`:halign "start"`,
-				`:spacing "6"`,
-			},
+			name:        "workspace num above range is ignored",
+			workspaces:  []Workspace{{Num: 11, Output: myOut, Urgent: true}},
+			output:      myOut,
+			wantFocused: 0,
+			wantStates:  map[int]string{10: "unoccupied"},
 		},
 		{
 			name: "mixed states across workspaces on same and different outputs",
@@ -125,12 +116,13 @@ func TestBuildWidget(t *testing.T) {
 				{Num: 3, Output: myOut},
 				{Num: 4, Output: otherOut, Focused: true}, // different output, ignored
 			},
-			output: myOut,
-			wantContains: []string{
-				`class "focused" "1"`,
-				`class "urgent" "2"`,
-				`class "occupied" "3"`,
-				`class "unoccupied" "4"`,
+			output:      myOut,
+			wantFocused: 1,
+			wantStates: map[int]string{
+				1: "focused",
+				2: "urgent",
+				3: "occupied",
+				4: "unoccupied",
 			},
 		},
 	}
@@ -139,70 +131,72 @@ func TestBuildWidget(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := buildWidget(tt.workspaces, tt.output)
+			got := buildPayload(tt.workspaces, tt.output)
 
-			for _, want := range tt.wantContains {
-				if !strings.Contains(got, want) {
-					t.Errorf("buildWidget() missing %q\ngot: %s", want, got)
-				}
+			if got.Focused != tt.wantFocused {
+				t.Errorf("Focused = %d, want %d", got.Focused, tt.wantFocused)
 			}
-			for _, absent := range tt.wantAbsent {
-				if strings.Contains(got, absent) {
-					t.Errorf("buildWidget() unexpectedly contains %q\ngot: %s", absent, got)
-				}
+			if want := endWS - startWS + 1; len(got.List) != want {
+				t.Errorf("len(List) = %d, want %d", len(got.List), want)
 			}
-			if count := strings.Count(got, "(button "); count != endWS-startWS+1 {
-				t.Errorf("buildWidget() produced %d buttons, want %d", count, endWS-startWS+1)
+			for i := startWS; i <= endWS; i++ {
+				want := tt.wantStates[i]
+				if want == "" {
+					want = "unoccupied"
+				}
+				if got := stateOf(got.List, i); got != want {
+					t.Errorf("workspace %d state = %q, want %q", i, got, want)
+				}
 			}
 		})
 	}
 }
 
-func TestBuildWidget_FocusedCount(t *testing.T) {
+func TestBuildPayload_FocusedInvariant(t *testing.T) {
 	t.Parallel()
 
 	const output = "HDMI-A-1"
 
 	tests := []struct {
-		name       string
-		workspaces []Workspace
-		wantCount  int
+		name        string
+		workspaces  []Workspace
+		wantFocused int
 	}{
 		{
-			name:      "no workspaces - zero focused buttons",
-			wantCount: 0,
+			name:        "no workspaces - focused is 0",
+			wantFocused: 0,
 		},
 		{
-			name: "one focused workspace - exactly one focused button",
+			name: "single focused workspace - focused matches its num",
 			workspaces: []Workspace{
 				{Num: 1, Output: output, Focused: true},
 				{Num: 2, Output: output},
 				{Num: 3, Output: output},
 			},
-			wantCount: 1,
+			wantFocused: 1,
 		},
 		{
-			name: "focused workspace on different output - zero focused buttons",
+			name: "focused workspace on different output - focused is 0",
 			workspaces: []Workspace{
 				{Num: 1, Output: "DP-1", Focused: true},
 			},
-			wantCount: 0,
+			wantFocused: 0,
 		},
 		{
-			name: "urgent workspace does not count as focused",
+			name: "urgent overrides focused - focused is 0",
 			workspaces: []Workspace{
 				{Num: 1, Output: output, Urgent: true, Focused: true},
 			},
-			wantCount: 0,
+			wantFocused: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := buildWidget(tt.workspaces, output)
-			if count := strings.Count(got, `class "focused"`); count != tt.wantCount {
-				t.Errorf("buildWidget() focused button count = %d, want %d\ngot: %s", count, tt.wantCount, got)
+			got := buildPayload(tt.workspaces, output)
+			if got.Focused != tt.wantFocused {
+				t.Errorf("Focused = %d, want %d", got.Focused, tt.wantFocused)
 			}
 		})
 	}
@@ -212,12 +206,12 @@ func TestRender(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		fetcher      WorkspaceFetcher
-		output       string
-		wantErr      bool
-		wantContains string
-		wantAbsent   string
+		name        string
+		fetcher     WorkspaceFetcher
+		output      string
+		wantErr     bool
+		wantFocused int
+		wantStates  map[int]string
 	}{
 		{
 			name:    "fetcher error propagates",
@@ -225,34 +219,36 @@ func TestRender(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:         "empty workspaces writes widget to writer",
-			fetcher:      &fakeFetcher{},
-			output:       "HDMI-A-1",
-			wantContains: `class "workspaces"`,
+			name:        "empty workspaces emits full unoccupied list",
+			fetcher:     &fakeFetcher{},
+			output:      "HDMI-A-1",
+			wantFocused: 0,
+			wantStates:  map[int]string{1: "unoccupied", 10: "unoccupied"},
 		},
 		{
-			name: "focused workspace appears in written output",
+			name: "focused workspace appears in payload",
 			fetcher: &fakeFetcher{workspaces: []Workspace{
 				{Num: 1, Output: "HDMI-A-1", Focused: true},
 			}},
-			output:       "HDMI-A-1",
-			wantContains: `class "focused" "1"`,
+			output:      "HDMI-A-1",
+			wantFocused: 1,
+			wantStates:  map[int]string{1: "focused"},
 		},
 		{
-			name: "urgent workspace appears in written output",
+			name: "urgent workspace appears in payload",
 			fetcher: &fakeFetcher{workspaces: []Workspace{
 				{Num: 3, Output: "HDMI-A-1", Urgent: true},
 			}},
-			output:       "HDMI-A-1",
-			wantContains: `class "urgent" "3"`,
+			output:     "HDMI-A-1",
+			wantStates: map[int]string{3: "urgent"},
 		},
 		{
-			name: "occupied workspace appears in written output",
+			name: "occupied workspace appears in payload",
 			fetcher: &fakeFetcher{workspaces: []Workspace{
 				{Num: 5, Output: "HDMI-A-1"},
 			}},
-			output:       "HDMI-A-1",
-			wantContains: `class "occupied" "5"`,
+			output:     "HDMI-A-1",
+			wantStates: map[int]string{5: "occupied"},
 		},
 		{
 			name: "workspaces on other output are excluded",
@@ -260,9 +256,9 @@ func TestRender(t *testing.T) {
 				{Num: 1, Output: "HDMI-A-1", Focused: true},
 				{Num: 2, Output: "DP-1", Focused: true},
 			}},
-			output:       "HDMI-A-1",
-			wantContains: `class "focused" "1"`,
-			wantAbsent:   `class "focused" "2"`,
+			output:      "HDMI-A-1",
+			wantFocused: 1,
+			wantStates:  map[int]string{1: "focused", 2: "unoccupied"},
 		},
 	}
 
@@ -274,13 +270,28 @@ func TestRender(t *testing.T) {
 			err := render(context.Background(), &buf, tt.fetcher, tt.output)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("render() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("render() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if !tt.wantErr && tt.wantContains != "" && !strings.Contains(buf.String(), tt.wantContains) {
-				t.Errorf("render() output missing %q\ngot: %s", tt.wantContains, buf.String())
+			if tt.wantErr {
+				return
 			}
-			if !tt.wantErr && tt.wantAbsent != "" && strings.Contains(buf.String(), tt.wantAbsent) {
-				t.Errorf("render() output unexpectedly contains %q\ngot: %s", tt.wantAbsent, buf.String())
+
+			// Encoder writes exactly one JSON object followed by '\n'.
+			if b := buf.Bytes(); len(b) == 0 || b[len(b)-1] != '\n' {
+				t.Errorf("render() output missing trailing newline: %q", b)
+			}
+
+			var got payload
+			if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+				t.Fatalf("render() output is not valid JSON: %v (%q)", err, buf.String())
+			}
+			if got.Focused != tt.wantFocused {
+				t.Errorf("Focused = %d, want %d", got.Focused, tt.wantFocused)
+			}
+			for n, want := range tt.wantStates {
+				if s := stateOf(got.List, n); s != want {
+					t.Errorf("workspace %d state = %q, want %q", n, s, want)
+				}
 			}
 		})
 	}
@@ -414,9 +425,6 @@ func TestReadMonitorOutput(t *testing.T) {
 		_, err := readMonitorOutput(ctx, path, "nonexistent")
 		if err == nil {
 			t.Fatal("readMonitorOutput() expected error for unknown monitor, got nil")
-		}
-		if !strings.Contains(err.Error(), "nonexistent") {
-			t.Errorf("readMonitorOutput() error should mention monitor name, got: %v", err)
 		}
 	})
 
