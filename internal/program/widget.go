@@ -1,28 +1,30 @@
 package program
 
-import (
-	"fmt"
-	"strings"
-)
-
 const (
-	startWS   = 1
-	endWS     = 10
-	ewwFormat = `(box :class "workspaces" :orientation "h" :halign "start" :spacing "6" :space-evenly "true" %s)`
-	btnFormat = `(button :onclick "swaymsg 'workspace %d'" :visible %t :class "%s" "%d")`
+	startWS = 1
+	endWS   = 10
 )
 
-// buildWidget maps workspaces onto button states and returns the EWW widget string.
-// Workspaces on a different output are ignored. Workspace numbers outside [startWS, endWS]
-// are ignored (prevents out-of-bounds on the state slices).
-func buildWidget(workspaces []Workspace, output string) string {
-	states := make([]string, endWS+1)
-	visible := make([]bool, endWS+1)
-	for i := startWS; i <= endWS; i++ {
-		states[i] = "unoccupied"
-		visible[i] = true
+type wsView struct {
+	N     int    `json:"n"`
+	State string `json:"state"`
+}
+
+type payload struct {
+	Focused int      `json:"focused"`
+	List    []wsView `json:"list"`
+}
+
+// buildPayload maps workspaces onto per-slot states for the eww consumer.
+// Workspaces on a different output are ignored. Workspace numbers outside
+// [startWS, endWS] are ignored (prevents out-of-bounds on the list slice).
+func buildPayload(workspaces []Workspace, output string) payload {
+	list := make([]wsView, endWS-startWS+1)
+	for i := range list {
+		list[i] = wsView{N: startWS + i, State: "unoccupied"}
 	}
 
+	focused := 0
 	for _, ws := range workspaces {
 		if ws.Output != output {
 			continue
@@ -30,19 +32,16 @@ func buildWidget(workspaces []Workspace, output string) string {
 		if ws.Num < startWS || ws.Num > endWS {
 			continue
 		}
+		idx := ws.Num - startWS
 		switch {
 		case ws.Urgent:
-			states[ws.Num] = "urgent"
+			list[idx].State = "urgent"
 		case ws.Focused:
-			states[ws.Num] = "focused"
+			list[idx].State = "focused"
+			focused = ws.Num
 		default:
-			states[ws.Num] = "occupied"
+			list[idx].State = "occupied"
 		}
 	}
-
-	parts := make([]string, 0, endWS)
-	for i := startWS; i <= endWS; i++ {
-		parts = append(parts, fmt.Sprintf(btnFormat, i, visible[i], states[i], i))
-	}
-	return fmt.Sprintf(ewwFormat, strings.Join(parts, " "))
+	return payload{Focused: focused, List: list}
 }

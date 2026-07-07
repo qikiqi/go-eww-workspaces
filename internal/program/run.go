@@ -2,6 +2,7 @@ package program
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,7 +16,9 @@ import (
 	"github.com/qikiqi/go-eww-workspaces/internal/version"
 )
 
-// render fetches workspaces and writes the EWW widget string to w.
+// render fetches workspaces and writes a JSON payload line to w.
+// Consumed by eww's deflisten; the trailing newline written by json.Encoder
+// is what deflisten treats as a value boundary.
 func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, output string) error {
 	fetchCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
@@ -25,8 +28,7 @@ func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, output s
 		return err
 	}
 
-	fmt.Fprintln(w, buildWidget(wss, output))
-	return nil
+	return json.NewEncoder(w).Encode(buildPayload(wss, output))
 }
 
 // shouldRerenderWindow reports whether a window event's change type can
