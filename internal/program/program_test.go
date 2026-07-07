@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -296,12 +297,51 @@ func TestRenderPayload(t *testing.T) {
 }
 
 // mutableFetcher lets a test flip the returned workspaces between emits.
+// Access is guarded so the debouncer goroutine can call FetchWorkspaces
+// concurrently with test mutations.
 type mutableFetcher struct {
+	mu         sync.Mutex
 	workspaces []Workspace
 }
 
+func (m *mutableFetcher) set(w []Workspace) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.workspaces = w
+}
+
 func (m *mutableFetcher) FetchWorkspaces(_ context.Context) ([]Workspace, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.workspaces, nil
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent reads/writes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *syncBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
+}
+
+func (b *syncBuffer) String() string {
+	return string(b.Bytes())
 }
 
 func TestEventHandler_EmitDedupesRepeatedPayload(t *testing.T) {
@@ -309,9 +349,8 @@ func TestEventHandler_EmitDedupesRepeatedPayload(t *testing.T) {
 
 	const output = "HDMI-A-1"
 
-	fetcher := &mutableFetcher{
-		workspaces: []Workspace{{Num: 1, Output: output, Focused: true}},
-	}
+	fetcher := &mutableFetcher{}
+	fetcher.set([]Workspace{{Num: 1, Output: output, Focused: true}})
 	var buf bytes.Buffer
 	h := &eventHandler{
 		fetcher: fetcher,
@@ -335,7 +374,7 @@ func TestEventHandler_EmitDedupesRepeatedPayload(t *testing.T) {
 	}
 
 	// State change → new emission must write.
-	fetcher.workspaces = []Workspace{{Num: 2, Output: output, Focused: true}}
+	fetcher.set([]Workspace{{Num: 2, Output: output, Focused: true}})
 	h.emit(ctx)
 	if buf.Len() <= after1 {
 		t.Errorf("expected state change to write; buffer stayed at %d", buf.Len())
@@ -358,6 +397,129 @@ func TestEventHandler_EmitDedupesRepeatedPayload(t *testing.T) {
 		if err := json.Unmarshal(line, &p); err != nil {
 			t.Errorf("line %d is not valid JSON: %v (%q)", i, err, line)
 		}
+	}
+}
+
+// waitFor polls check every 5ms up to timeout; returns true if check ever
+// returns true. Preferred over fixed sleeps for asserting on debouncer output.
+func waitFor(timeout time.Duration, check func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if check() {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return check()
+}
+
+func countLines(b []byte) int {
+	trimmed := bytes.TrimRight(b, "\n")
+	if len(trimmed) == 0 {
+		return 0
+	}
+	return bytes.Count(trimmed, []byte("\n")) + 1
+}
+
+func TestEventHandler_DebouncerCoalescesBursts(t *testing.T) {
+	t.Parallel()
+
+	const output = "HDMI-A-1"
+	fetcher := &mutableFetcher{}
+	fetcher.set([]Workspace{{Num: 1, Output: output, Focused: true}})
+	buf := &syncBuffer{}
+	h := newEventHandler(fetcher, buf, output, 20*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		h.runDebouncer(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// Fire a burst; expect exactly one line after the trailing edge.
+	for range 5 {
+		h.kick()
+	}
+	if !waitFor(200*time.Millisecond, func() bool { return countLines(buf.Bytes()) == 1 }) {
+		t.Fatalf("expected 1 emitted line from burst, got %d: %q", countLines(buf.Bytes()), buf.String())
+	}
+
+	// State change → new burst → second emit.
+	fetcher.set([]Workspace{{Num: 2, Output: output, Focused: true}})
+	for range 3 {
+		h.kick()
+	}
+	if !waitFor(200*time.Millisecond, func() bool { return countLines(buf.Bytes()) == 2 }) {
+		t.Fatalf("expected 2 lines after state change, got %d: %q", countLines(buf.Bytes()), buf.String())
+	}
+
+	// Each emitted line must be a valid JSON payload.
+	for i, line := range bytes.Split(bytes.TrimRight(buf.Bytes(), "\n"), []byte("\n")) {
+		var p payload
+		if err := json.Unmarshal(line, &p); err != nil {
+			t.Errorf("line %d not valid JSON: %v (%q)", i, err, line)
+		}
+	}
+}
+
+func TestEventHandler_DebouncerExitsOnCancel(t *testing.T) {
+	t.Parallel()
+
+	fetcher := &mutableFetcher{}
+	buf := &syncBuffer{}
+	h := newEventHandler(fetcher, buf, "HDMI-A-1", 20*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		h.runDebouncer(ctx)
+		close(done)
+	}()
+
+	// Cancel with no pending kicks — outer select's ctx.Done() case.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("debouncer did not exit after ctx cancel")
+	}
+}
+
+func TestEventHandler_DebouncerExitsDuringTimerWait(t *testing.T) {
+	t.Parallel()
+
+	fetcher := &mutableFetcher{}
+	fetcher.set([]Workspace{{Num: 1, Output: "HDMI-A-1", Focused: true}})
+	buf := &syncBuffer{}
+	// Long debounce so we can cancel while the inner timer is still waiting.
+	h := newEventHandler(fetcher, buf, "HDMI-A-1", time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		h.runDebouncer(ctx)
+		close(done)
+	}()
+
+	h.kick()
+	// Give the debouncer time to enter the inner loop and start the timer.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("debouncer did not exit during timer wait after ctx cancel")
+	}
+
+	// Cancelled before timer fired → no emit.
+	if got := buf.Len(); got != 0 {
+		t.Errorf("expected no emit after cancel-during-timer, buf len = %d: %q", got, buf.String())
 	}
 }
 

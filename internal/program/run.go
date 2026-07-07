@@ -10,12 +10,19 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	sway "github.com/joshuarubin/go-sway"
 
 	"github.com/qikiqi/go-eww-workspaces/internal/version"
 )
+
+// debounceInterval is the trailing-edge coalescing window for sway event
+// bursts. 16 ms is one frame at 60 Hz — imperceptible to the user, long
+// enough to fold typical tiling bursts (window::new + window::move +
+// workspace::focus arriving within a few milliseconds) into a single emit.
+const debounceInterval = 16 * time.Millisecond
 
 // renderPayload fetches workspaces and encodes them as a JSON line
 // (payload object + trailing '\n') suitable for eww's deflisten.
@@ -47,15 +54,42 @@ func shouldRerenderWindow(change sway.WindowEventChange) bool {
 }
 
 // eventHandler drives re-renders in response to sway subscribe events.
-// Skips writes when the newly-rendered payload matches the previous one,
-// so no-op events (e.g. window::move within a workspace whose occupancy
-// didn't change) don't hit the stdout pipe or eww's parser.
+//
+// Sway events are funneled through a trailing-edge debouncer so a burst
+// of updates within debounce collapses to one emit. Combined with the
+// payload-dedup check in emit, the eww consumer sees exactly the visible
+// state changes and none of the intermediate churn.
 type eventHandler struct {
 	sway.EventHandler
-	fetcher WorkspaceFetcher
-	writer  io.Writer
-	output  string
-	last    []byte
+	fetcher  WorkspaceFetcher
+	writer   io.Writer
+	output   string
+	last     []byte
+	signal   chan struct{}
+	debounce time.Duration
+}
+
+// newEventHandler wires an event handler with a size-1 signal channel and
+// the given debounce window. Callers must run runDebouncer in a goroutine.
+func newEventHandler(fetcher WorkspaceFetcher, w io.Writer, output string, debounce time.Duration) *eventHandler {
+	return &eventHandler{
+		EventHandler: sway.NoOpEventHandler(),
+		fetcher:      fetcher,
+		writer:       w,
+		output:       output,
+		signal:       make(chan struct{}, 1),
+		debounce:     debounce,
+	}
+}
+
+// kick requests a debounced re-emit. Non-blocking: if a request is
+// already queued, the extra kick is dropped (the debouncer will pick
+// up the latest state when its window fires).
+func (h *eventHandler) kick() {
+	select {
+	case h.signal <- struct{}{}:
+	default:
+	}
 }
 
 // emit renders the current state and writes it if it differs from the
@@ -77,15 +111,47 @@ func (h *eventHandler) emit(ctx context.Context) {
 	h.last = append(h.last[:0], next...)
 }
 
-func (h *eventHandler) Workspace(ctx context.Context, _ sway.WorkspaceEvent) {
-	h.emit(ctx)
+// runDebouncer consumes signals and calls emit at most once per debounce
+// window. A kick starts the timer; further kicks reset it; when the timer
+// fires, one emit happens. Exits when ctx is cancelled.
+func (h *eventHandler) runDebouncer(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-h.signal:
+			timer := time.NewTimer(h.debounce)
+		waiting:
+			for {
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					return
+				case <-h.signal:
+					if !timer.Stop() {
+						<-timer.C
+					}
+					timer.Reset(h.debounce)
+				case <-timer.C:
+					break waiting
+				}
+			}
+			h.emit(ctx)
+		}
+	}
 }
 
-func (h *eventHandler) Window(ctx context.Context, e sway.WindowEvent) {
+func (h *eventHandler) Workspace(_ context.Context, _ sway.WorkspaceEvent) {
+	h.kick()
+}
+
+func (h *eventHandler) Window(_ context.Context, e sway.WindowEvent) {
 	if !shouldRerenderWindow(e.Change) {
 		return
 	}
-	h.emit(ctx)
+	h.kick()
 }
 
 // subscribeAndRender handles initial render and sway subscription.
@@ -109,19 +175,33 @@ func subscribeAndRender(ctx context.Context, monitor, file string) error {
 		return err
 	}
 
-	handler := &eventHandler{
-		EventHandler: sway.NoOpEventHandler(),
-		fetcher:      fetcher,
-		writer:       os.Stdout,
-		output:       output,
-	}
+	handler := newEventHandler(fetcher, os.Stdout, output, debounceInterval)
+
+	// The initial emit is synchronous and bypasses the debouncer — eww's
+	// deflisten should have a value to render as soon as the daemon starts.
 	handler.emit(ctx)
 
-	if err := sway.Subscribe(ctx, handler, sway.EventTypeWorkspace, sway.EventTypeWindow); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// Debouncer runs under a derived context so we can stop it before
+	// returning, ensuring the goroutine has exited (goleak-clean).
+	dctx, cancelD := context.WithCancel(ctx)
+	defer cancelD()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		handler.runDebouncer(dctx)
+	}()
+
+	subErr := sway.Subscribe(ctx, handler, sway.EventTypeWorkspace, sway.EventTypeWindow)
+	cancelD()
+	wg.Wait()
+
+	if subErr != nil {
+		if errors.Is(subErr, context.Canceled) || errors.Is(subErr, context.DeadlineExceeded) {
 			return nil
 		}
-		return fmt.Errorf("sway subscribe: %w", err)
+		return fmt.Errorf("sway subscribe: %w", subErr)
 	}
 	return nil
 }
