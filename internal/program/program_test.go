@@ -393,4 +393,33 @@ func TestReadMonitorOutput(t *testing.T) {
 			t.Error("readMonitorOutput() expected error for canceled context, got nil")
 		}
 	})
+
+	t.Run("retries until file contains valid JSON", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		path := filepath.Join(dir, "monitors.json")
+
+		// Non-empty content that passes waitForFile but fails json.Unmarshal.
+		if err := os.WriteFile(path, []byte(`not valid json`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Overwrite with valid JSON well before the 200 ms retry fires.
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			_ = os.WriteFile(path, []byte(`[{"monitor":"eDP-1","output":"HDMI-A-1"}]`), 0o644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		got, err := readMonitorOutput(ctx, path, "eDP-1")
+		if err != nil {
+			t.Fatalf("readMonitorOutput() unexpected error: %v", err)
+		}
+		if got != "HDMI-A-1" {
+			t.Errorf("readMonitorOutput() = %q, want %q", got, "HDMI-A-1")
+		}
+	})
 }
