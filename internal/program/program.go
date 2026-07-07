@@ -258,7 +258,10 @@ func Run(ctx context.Context) {
 	flag.Parse()
 
 	if *versionFlag || *versionFlagShort {
-		version.Print()
+		if err := version.Print(); err != nil {
+			slog.Error("version info unavailable", "err", err)
+			os.Exit(1)
+		}
 		return
 	}
 
