@@ -84,17 +84,17 @@ func waitForFile(ctx context.Context, path string, interval time.Duration) ([]by
 
 // autoDetectMonitorOutput runs `swaymsg -t get_outputs` and returns the output
 // string for the first active monitor, formatted the same way as readMonitorOutput.
-func autoDetectMonitorOutput(ctx context.Context) (string, error) {
+func autoDetectMonitorOutput(ctx context.Context, cmdName string) (string, error) {
 	type swayOutput struct {
 		Name   string `json:"name"`
 		Active bool   `json:"active"`
 	}
 
-	cmd := exec.CommandContext(ctx, "swaymsg", "-t", "get_outputs")
+	cmd := exec.CommandContext(ctx, cmdName, "-t", "get_outputs")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("run swaymsg: %w", err)
+		return "", fmt.Errorf("%s get_outputs: %w", cmdName, err)
 	}
 
 	var outputs []swayOutput
@@ -191,17 +191,17 @@ func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, cmdName,
 }
 
 // subscribeAndRender handles initial render and i3/sway subscriptions.
-func subscribeAndRender(monitor, file string) error {
+func subscribeAndRender(ctx context.Context, monitor, file string) error {
 	cmdName := detectCommand()
 	fetcher := &commandFetcher{cmdName: cmdName}
 
-	execCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var output string
 	var err error
 	if monitor == "" {
-		output, err = autoDetectMonitorOutput(execCtx)
+		output, err = autoDetectMonitorOutput(execCtx, cmdName)
 	} else {
 		output, err = readMonitorOutput(execCtx, file, monitor)
 	}
@@ -209,11 +209,11 @@ func subscribeAndRender(monitor, file string) error {
 		return err
 	}
 
-	if err := render(context.Background(), os.Stdout, fetcher, cmdName, output); err != nil {
+	if err := render(ctx, os.Stdout, fetcher, cmdName, output); err != nil {
 		slog.Error("initial render failed", "err", err)
 	}
 
-	subCmd := exec.Command(cmdName, "-t", "subscribe", "-m", `["window","workspace"]`)
+	subCmd := exec.CommandContext(ctx, cmdName, "-t", "subscribe", "-m", `["window","workspace"]`)
 	stdout, err := subCmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("create stdout pipe for subscribe: %w", err)
@@ -224,7 +224,7 @@ func subscribeAndRender(monitor, file string) error {
 
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
-		if err := render(context.Background(), os.Stdout, fetcher, cmdName, output); err != nil {
+		if err := render(ctx, os.Stdout, fetcher, cmdName, output); err != nil {
 			slog.Error("render failed", "err", err)
 		}
 	}
@@ -258,11 +258,14 @@ func Run(ctx context.Context) {
 	flag.Parse()
 
 	if *versionFlag || *versionFlagShort {
-		version.Print()
+		if err := version.Print(); err != nil {
+			slog.Error("version info unavailable", "err", err)
+			os.Exit(1)
+		}
 		return
 	}
 
-	if err := subscribeAndRender(*monitor, *file); err != nil {
+	if err := subscribeAndRender(ctx, *monitor, *file); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			slog.Error("command exited with error", "err", err)
