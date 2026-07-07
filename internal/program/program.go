@@ -191,11 +191,11 @@ func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, cmdName,
 }
 
 // subscribeAndRender handles initial render and i3/sway subscriptions.
-func subscribeAndRender(monitor, file string) error {
+func subscribeAndRender(ctx context.Context, monitor, file string) error {
 	cmdName := detectCommand()
 	fetcher := &commandFetcher{cmdName: cmdName}
 
-	execCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var output string
@@ -209,11 +209,11 @@ func subscribeAndRender(monitor, file string) error {
 		return err
 	}
 
-	if err := render(context.Background(), os.Stdout, fetcher, cmdName, output); err != nil {
+	if err := render(ctx, os.Stdout, fetcher, cmdName, output); err != nil {
 		slog.Error("initial render failed", "err", err)
 	}
 
-	subCmd := exec.Command(cmdName, "-t", "subscribe", "-m", `["window","workspace"]`)
+	subCmd := exec.CommandContext(ctx, cmdName, "-t", "subscribe", "-m", `["window","workspace"]`)
 	stdout, err := subCmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("create stdout pipe for subscribe: %w", err)
@@ -224,7 +224,7 @@ func subscribeAndRender(monitor, file string) error {
 
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
-		if err := render(context.Background(), os.Stdout, fetcher, cmdName, output); err != nil {
+		if err := render(ctx, os.Stdout, fetcher, cmdName, output); err != nil {
 			slog.Error("render failed", "err", err)
 		}
 	}
@@ -265,7 +265,7 @@ func Run(ctx context.Context) {
 		return
 	}
 
-	if err := subscribeAndRender(*monitor, *file); err != nil {
+	if err := subscribeAndRender(ctx, *monitor, *file); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			slog.Error("command exited with error", "err", err)
