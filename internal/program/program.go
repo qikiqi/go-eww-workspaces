@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -37,6 +38,32 @@ type Workspace struct {
 	Output  string `json:"output"`
 }
 
+// WorkspaceFetcher retrieves the current workspace list from the window manager.
+type WorkspaceFetcher interface {
+	FetchWorkspaces(ctx context.Context) ([]Workspace, error)
+}
+
+// compile-time check
+var _ WorkspaceFetcher = (*commandFetcher)(nil)
+
+// commandFetcher is the real WorkspaceFetcher backed by swaymsg/i3-msg.
+type commandFetcher struct {
+	cmdName string
+}
+
+func (f *commandFetcher) FetchWorkspaces(ctx context.Context) ([]Workspace, error) {
+	cmd := exec.CommandContext(ctx, f.cmdName, "-t", "get_workspaces")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("%s get_workspaces: %w", f.cmdName, err)
+	}
+	var wss []Workspace
+	if err := json.Unmarshal(out, &wss); err != nil {
+		return nil, fmt.Errorf("unmarshal workspaces JSON: %w", err)
+	}
+	return wss, nil
+}
+
 // waitForFile polls until the file at path is readable and non-empty, or context done.
 func waitForFile(ctx context.Context, path string, interval time.Duration) ([]byte, error) {
 	ticker := time.NewTicker(interval)
@@ -58,7 +85,6 @@ func waitForFile(ctx context.Context, path string, interval time.Duration) ([]by
 // autoDetectMonitorOutput runs `swaymsg -t get_outputs` and returns the output
 // string for the first active monitor, formatted the same way as readMonitorOutput.
 func autoDetectMonitorOutput(ctx context.Context) (string, error) {
-	// Define only the fields we need from swaymsg JSON
 	type swayOutput struct {
 		Name   string `json:"name"`
 		Active bool   `json:"active"`
@@ -113,22 +139,10 @@ func readMonitorOutput(ctx context.Context, path, monitor string) (string, error
 	return "", fmt.Errorf("monitor %q not found in %s", monitor, path)
 }
 
-// fetchWorkspaces retrieves workspaces using the detected command.
-func fetchWorkspaces(ctx context.Context, cmdName string) ([]Workspace, error) {
-	cmd := exec.CommandContext(ctx, cmdName, "-t", "get_workspaces")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("%s get_workspaces: %w", cmdName, err)
-	}
-	var wss []Workspace
-	if err := json.Unmarshal(out, &wss); err != nil {
-		return nil, fmt.Errorf("unmarshal workspaces JSON: %w", err)
-	}
-	return wss, nil
-}
-
-// render builds and prints the EWW widget for the given output.
-func render(cmdName, output string) error {
+// buildWidget maps workspaces onto button states and returns the EWW widget string.
+// Workspaces on a different output are ignored. Workspace numbers outside [startWS, endWS]
+// are ignored (prevents out-of-bounds on the state slices).
+func buildWidget(workspaces []Workspace, output, cmdName string) string {
 	states := make([]string, endWS+1)
 	visible := make([]bool, endWS+1)
 	for i := startWS; i <= endWS; i++ {
@@ -136,15 +150,11 @@ func render(cmdName, output string) error {
 		visible[i] = true
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	wss, err := fetchWorkspaces(ctx, cmdName)
-	if err != nil {
-		return err
-	}
-
-	for _, ws := range wss {
+	for _, ws := range workspaces {
 		if ws.Output != output {
+			continue
+		}
+		if ws.Num < startWS || ws.Num > endWS {
 			continue
 		}
 		switch {
@@ -155,23 +165,34 @@ func render(cmdName, output string) error {
 		default:
 			states[ws.Num] = "occupied"
 		}
-		visible[ws.Num] = true
 	}
 
 	parts := make([]string, 0, endWS)
 	for i := startWS; i <= endWS; i++ {
-		parts = append(parts, fmt.Sprintf(btnFormat, detectCommand(), i, visible[i], states[i], i))
+		parts = append(parts, fmt.Sprintf(btnFormat, cmdName, i, visible[i], states[i], i))
 	}
-	widget := fmt.Sprintf(ewwFormat, strings.Join(parts, " "))
-	fmt.Println(widget)
+	return fmt.Sprintf(ewwFormat, strings.Join(parts, " "))
+}
+
+// render fetches workspaces and writes the EWW widget string to w.
+func render(ctx context.Context, w io.Writer, fetcher WorkspaceFetcher, cmdName, output string) error {
+	fetchCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	wss, err := fetcher.FetchWorkspaces(fetchCtx)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(w, buildWidget(wss, output, cmdName))
 	return nil
 }
 
 // subscribeAndRender handles initial render and i3/sway subscriptions.
 func subscribeAndRender(monitor, file string) error {
 	cmdName := detectCommand()
+	fetcher := &commandFetcher{cmdName: cmdName}
 
-	// initial render
 	execCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -185,11 +206,11 @@ func subscribeAndRender(monitor, file string) error {
 	if err != nil {
 		return err
 	}
-	if err := render(cmdName, output); err != nil {
+
+	if err := render(context.Background(), os.Stdout, fetcher, cmdName, output); err != nil {
 		log.Println("initial render error:", err)
 	}
 
-	// subscribe to events
 	subCmd := exec.Command(cmdName, "-t", "subscribe", "-m", `["window","workspace"]`)
 	stdout, err := subCmd.StdoutPipe()
 	if err != nil {
@@ -201,7 +222,7 @@ func subscribeAndRender(monitor, file string) error {
 
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
-		if err := render(cmdName, output); err != nil {
+		if err := render(context.Background(), os.Stdout, fetcher, cmdName, output); err != nil {
 			log.Println("render error:", err)
 		}
 	}
@@ -213,20 +234,16 @@ func subscribeAndRender(monitor, file string) error {
 
 // detectCommand returns "swaymsg" if it successfully detects sway, otherwise "i3-msg".
 func detectCommand() string {
-	// first try swaymsg
 	if swayPath, err := exec.LookPath("swaymsg"); err == nil {
-		// verify it really is a sway instance
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
 		if err := exec.CommandContext(ctx, swayPath, "-t", "get_version").Run(); err == nil {
 			return swayPath
 		}
 	}
-	// fallback to i3-msg
 	if i3Path, err := exec.LookPath("i3-msg"); err == nil {
 		return i3Path
 	}
-	// last resort, just the name (will error later if not on PATH)
 	return "i3-msg"
 }
 
